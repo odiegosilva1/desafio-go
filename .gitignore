@@ -1,0 +1,34 @@
+# Binários e artefatos de build
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Ambiente e segredos
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Go
+vendor/
+
+# Ferramentas
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Sistemas de arquivos
+.DS_Store
+Thumbs.db
+
+# Cobertura de testes
+coverage/
+coverage.txt
