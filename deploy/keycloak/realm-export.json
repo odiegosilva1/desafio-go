@@ -88,7 +88,7 @@
       "consentRequired": false,
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
+      "directAccessGrantsEnabled": true,
       "serviceAccountsEnabled": true,
       "secret": "wallet-service-secret",
       "protocolMappers": [
@@ -207,5 +207,23 @@
       "optionalClientScopes": []
     }
   ],
-  "users": []
+  "users": [
+    {
+      "username": "tester",
+      "enabled": true,
+      "email": "tester@localhost",
+      "firstName": "Test",
+      "lastName": "Tester",
+      "emailVerified": false,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "tester",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [],
+      "clientRoles": {}
+    }
+  ]
 }

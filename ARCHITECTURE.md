@@ -182,5 +182,50 @@ que torna o replay idempotente nas duas portas.
   PENDING_REFERENCE resolvida pelo worker, e composição Fx start/stop.
   Rodados serializados (`-p 1`) porque resetam o mesmo banco:
   `go test -tags integration -count=1 -p 1 ./internal/...`
+- Múltiplas instâncias (`test/multiinstance`) e simulações de falha
+  (`test/faults`): ver README §Testes de integração. Rodam com o mesmo Postgres.
 - E2E (`make up` + `make e2e`): LocalStack + Keycloak habilitam a malha
   completa HTTP+SQS+outbox.
+
+## Limitações, interpretações e trabalho não concluído
+
+- **Contrato da DLQ (interpretação do §10)**: apenas **falha permanente**,
+  **payload inválido** ou tentativas esgotadas vão à DLQ. Rejeições definitivas
+  de negócio (saldo insuficiente, carteira inexistente, reversão duplicada) são
+  **terminais**: confirmadas na inbox com o `FailureCode` e a mensagem é
+  removida da fila sem efeito financeiro. Validado em `test/faults` e no
+  `deploy/e2e/scenario.sh`.
+- **Autorização por identidade do cliente, não por escopo**: o `client_id` do
+  JWT é o `providerId` (decisão do §2). Os escopos `wallet:provider`,
+  `wallet:internal` e `wallet:admin` são definidos e emitidos pelo IdP, mas o
+  ponto de autorização na aplicação é a **identidade do cliente** (e o
+  isolamento por provedor no domínio); `auth.Principal.HasScope` não é cobrado
+  no middleware. O cliente interno é identificado pelo `client_id`.
+- **Usuário humano é demonstração**: o realm importa `tester` para fluxos
+  interativos (password grant) via `wallet-service`. Em produção **todo** acesso
+  ao negócio é `client_credentials` de um cliente-provedor; nenhum usuário
+  humano autentica na API.
+- **Idempotência da inbox por SQS MessageId**: reentregas do mesmo envio são
+  deduplicadas pela inbox. O replay da DLQ usa **novo** SQS MessageId; a
+  reexecução é inofensiva porque a deduplicação financeira é por
+  `(providerId, idempotencyKey)` — os dois níveis somados garantem exactly-once.
+- **Janela de republicação da outbox**: a publicação acontece **antes** do
+  commit do `MarkPublished`. Uma falha entre publicar e confirmar reformata o
+  registro PENDING e republica — seguro porque o `eventId` é estável e o destino
+  usa `MessageDeduplicationId = eventId`. Impacto prático: conteúdo duplicado na
+  entrada do destino durante a janela, nunca um evento novo com id novo.
+- **`wallet-events.fifo` é solicitado apenas (publish)**: não há consumer de
+  eventos nem replay de eventos; a reconciliação a montante fica com os clients.
+- **Escala horizontal sem particionamento** das filas FIFO: a concorrência é
+  resolvida no banco (`FOR UPDATE SKIP LOCKED` em carteira/outbox/referências);
+  a regra FIFO por `walletId` preserva a ordem por carteira.
+- **Não executado neste ambiente**: `docker compose up` (LocalStack, Keycloak)
+  e o `deploy/e2e/scenario.sh` dependem de Docker, indisponível no ambiente de
+  desenvolvimento (permissão em `/var/run/docker.sock`). A malha foi validada
+  por integração com fake SQS/OIDC; as ferramentas `producer`/`replay` são
+  funcionais e cobertas por testes unit.
+- **Trabalho não concluído (roadmap)**: observabilidade refinada (traços,
+  dashboards), contratos OpenAPI publicados e CI/CD + reconciliação **periódica**
+  (a reconciliação **pontual** por carteira existe: `POST /wallets/{id}/reconciliation`).
+- **`make check` cobre os comandos §15**: `go vet ./...`, `go test ./...` e
+  `go test -race ./...`; `make up` equivale a `docker compose up --build`.

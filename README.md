@@ -48,11 +48,13 @@ make up                 # sobe Postgres + LocalStack + Keycloak e provisiona SQS
 make run                # go run ./cmd/server (com .env dev)
 make provision          # cria as filas SQS no LocalStack (idempotente)
 make db-up              # apenas Postgres
+make migrate            # aplica migrations (up, default)
+make migrate ARGS=down  # reverte migrations (até a versão anterior)
 make test-integration   # integração (exige Postgres; usa -p 1)
 make integration-check  # db-up + integração + race + db-down
 make producer ARGS='...'# enfileira mensagens em wager-transactions.fifo
 make replay ARGS='...'  # scan/requeue da DLQ
-make e2e-scenario       # ciclo completo producer→consumidor→DLQ→replay
+make e2e-scenario       # rejeição terminal + payload inválido→DLQ→replay
 make e2e                # up + run (malha completa HTTP+SQS+Keycloak)
 make down               # derruba a infra
 ```
@@ -94,6 +96,78 @@ inofensivas, pois o serviço deduplica financeiramente por
 `(providerId, idempotencyKey)` e pela inbox. O corpo é reenviado verbatim; o
 `FailureCode` original é preservado como atributo informativo.
 
+## Fluxos autenticados (Keycloak) e exemplos de chamadas
+
+Com `make infra` o realm `wallet` é provisionado automaticamente com as
+**identidades de teste** abaixo (todas com valores locais, ver
+`deploy/keycloak/realm-export.json`):
+
+| Identidade            | Tipo        | Segredo/credencial        | Enxerga                    |
+|-----------------------|-------------|---------------------------|----------------------------|
+| `provider-a`          | cliente OAuth (provedor A) | `provider-a-secret` | só carteiras/transações de `provider-a` |
+| `provider-b`          | cliente OAuth (provedor B) | `provider-b-secret` | só carteiras/transações de `provider-b` |
+| `wallet-service-internal` | cliente interno  | `wallet-internal-secret` | abertura/reconciliação (não é provedor) |
+| `tester` / `tester`   | usuário (password grant)  | senha `tester`      | fluxo interativo via `wallet-service`    |
+
+Obter um token de provedor (`client_credentials`) e inspecionar o JWT:
+
+```sh
+TOKEN_A="$(curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=provider-a' \
+  -d 'client_secret=provider-a-secret' \
+  | jq -r .access_token)"
+echo "$TOKEN_A" | cut -d. -f2 | base64 -d 2>/dev/null | jq {client_id,scope,aud} || true
+```
+
+Abrir uma carteira (o `client_id` do token define o `providerId`):
+
+```sh
+curl -s http://localhost:8080/wallets \
+  -H "Authorization: Bearer $TOKEN_A" -H 'Content-Type: application/json' \
+  -d '{"playerId":"player-1","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+# {"id":"<walletId>","playerId":"player-1","balance":{"amount":"100.00","currency":"BRL"},"version":0}
+```
+
+Enviar uma aposta e consultar o resultado:
+
+```sh
+WALLET="<walletId>"
+curl -s http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $TOKEN_A" -H 'Content-Type: application/json' \
+  -d "{\"externalTransactionId\":\"tx-1\",\"playerId\":\"player-1\",\"walletId\":\"$WALLET\",
+        \"roundId\":\"round-1\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",
+        \"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+# {"transactionId":"...","status":"PROCESSED","balance":{"amount":"75.00","currency":"BRL"},...}
+
+curl -s http://localhost:8080/wallets/$WALLET \
+  -H "Authorization: Bearer $TOKEN_A"
+curl -s http://localhost:8080/wallets/$WALLET/ledger \
+  -H "Authorization: Bearer $TOKEN_A"
+```
+
+Isolamento por provedor (o token de `provider-b` **não** enxerga a carteira de
+`provider-a` → `404`), reconciliação apenas com o cliente interno e fluxo
+interativo com o usuário de teste:
+
+```sh
+# provider-b não vê a carteira de provider-a
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/wallets/$WALLET \
+  -H "Authorization: Bearer $TOKEN_B"    # 404
+
+# reconciliação (somente wallet-service-internal)
+TOKEN_INT="$(curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' -d 'client_id=wallet-service-internal' \
+  -d 'client_secret=wallet-internal-secret' | jq -r .access_token)"
+curl -s -X POST http://localhost:8080/wallets/$WALLET/reconciliation \
+  -H "Authorization: Bearer $TOKEN_INT" -H 'Content-Type: application/json' -d '{}'
+
+# usuário de teste (password grant, somente demonstração interativa)
+curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=password' -d 'client_id=wallet-service' \
+  -d 'client_secret=wallet-service-secret' -d 'username=tester' -d 'password=tester'
+```
+
 ## Configuração
 
 Variáveis de ambiente documentadas em [`.env.example`](.env.example)
@@ -122,3 +196,29 @@ da mesma carteira sob concorrência forte, rejeição por saldo, publicação da
 outbox exatamente uma vez por eventId no agregado das instâncias, e retomada
 de trabalho abandonado (`PENDING_REFERENCE` + outbox) após a morte brutal de
 uma instância.
+
+### Simulações de falha (`test/faults`)
+
+Usam o **Postgres real** e um `fakeSQS` que implementa a interface
+`messaging.SQSClient` (sem LocalStack), dirigindo o `Consumer` e o
+`OutboxPublisher` de produção contra falhas:
+
+- `TestConsumerDBOutageKeepsMessageAndRecovers` — banco indisponível durante o
+  processamento: a mensagem **permanece** na fila (sem delete, sem DLQ) e, com o
+  banco recuperado, a reentrega da mesma mensagem processa exatamente-uma-vez
+  (inbox deduplica).
+- `TestConsumerBusinessRejectionIsTerminalAndNoDLQ` — rejeição definitiva de
+  negócio (saldo insuficiente) é **terminal**: consome a mensagem, registra na
+  inbox com o código e **não** encaminha à DLQ (specs §10).
+- `TestConsumerInvalidPayloadToDLQ` — corpo ilegível vai à DLQ com
+  `INVALID_MESSAGE` e é removido da fila, sem efeito no banco.
+- `TestOutboxPublisherRetryPublishesExactlyOnce` — destino de eventos fora do
+  ar: registros permanecem `PENDING` (rollback, nenhum `MarkPublished` com
+  falha) e, recuperado, cada eventId é entregue com id estável (dedup no
+  destino) e nenhuma republicação após a confirmação.
+- `TestOutboxPublisherSurvivesInstanceChange` — outra instância retoma registros
+  herdados sem republicar os já confirmados (`published_by` por instância).
+
+Contrato de DLQ (validado nos testes e no `deploy/e2e/scenario.sh`): apenas
+**falha permanente**, **payload inválido** ou tentativas esgotadas vão à DLQ;
+rejeições de negócio são confirmadas no inbox e removidas da fila.

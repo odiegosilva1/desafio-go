@@ -56,8 +56,11 @@ db-down:
 
 # --- Migrations ---
 # Aplicam automaticamente no start; útil para reverter o schema em dev.
+# Uso: make migrate            -> up (default)
+#      make migrate ARGS=down  -> reverte para a versão anterior
+ARGS ?= up
 migrate:
-	go run ./cmd/migrate
+	go run ./cmd/migrate $(ARGS)
 
 # --- SQS: provisionamento idempotente das filas no LocalStack ---
 provision:
