@@ -12,15 +12,18 @@ autenticação OAuth 2.0/OIDC via Keycloak.
 
 ```
 cmd/server/               entrada da aplicação e sinalização
+cmd/migrate/              CLI de migrations (up|down)
+cmd/producer/             injeta transações em wager-transactions.fifo
+cmd/replay/               inspeciona e recupera a DLQ
 internal/domain/          domínio puro (money, ledger, wagering, wallet, event, derr)
 internal/application/     casos de uso, referências, outbox e reconciliação
 internal/storage/         port (interfaces) + postgres (pgx, migrações)
 internal/httpapi/         contratos HTTP, middlewares de auth e handlers
 internal/auth/            validação OIDC e autorização por provedor
-internal/messaging/       consumidor SQS + inbox, publisher e provisionamento
+internal/messaging/       consumidor SQS + inbox, publisher, envelopes e provisionamento
 internal/app/             módulos Fx, ciclo de vida e migrations embutidas
 internal/observability/   logs JSON, métricas e health checks
-deploy/                   realm Keycloak e provisionamento de filas SQS
+deploy/                   realm Keycloak, filas SQS e cenários E2E
 ```
 
 ## Fluxo de trabalho (Git Flow)
@@ -47,9 +50,49 @@ make provision          # cria as filas SQS no LocalStack (idempotente)
 make db-up              # apenas Postgres
 make test-integration   # integração (exige Postgres; usa -p 1)
 make integration-check  # db-up + integração + race + db-down
+make producer ARGS='...'# enfileira mensagens em wager-transactions.fifo
+make replay ARGS='...'  # scan/requeue da DLQ
+make e2e-scenario       # ciclo completo producer→consumidor→DLQ→replay
 make e2e                # up + run (malha completa HTTP+SQS+Keycloak)
 make down               # derruba a infra
 ```
+
+## Ferramentas de operação (SQS)
+
+### `cmd/producer` — injetar transações em `wager-transactions.fifo`
+
+Produz mensagens com o mesmo wire do consumidor (`internal/messaging`). O
+envelope é o JSON definido no §10 do `specs.md`:
+
+```sh
+# Constrói e enfileira um BET
+go run ./cmd/producer wager -wallet <walletId> -player <playerId> \
+  -round <roundId> -game <gameId> -kind BET -amount 25.00
+
+# Envia envelopes prontos (objeto ou lista JSON), da stdin ou de arquivo
+go run ./cmd/producer send -file envelope.json
+
+# Imprime um envelope de exemplo
+go run ./cmd/producer sample
+```
+
+Convenções FIFO (documentadas também em `ARCHITECTURE.md` §mensageria):
+- `MessageGroupId = data.walletId` — preserva a ordem por carteira.
+- `MessageDeduplicationId = messageId` do envelope (estável na janela de 5 min).
+- `-repeat N` regenera o `messageId` por cópia (exige-o vazio no arquivo), para
+  cenários de concorrência na mesma carteira.
+
+### `cmd/replay` — DLQ `wager-transactions-dlq.fifo`
+
+```sh
+go run ./cmd/replay scan -limit 10        # inspeciona sem destruir
+go run ./cmd/replay requeue -limit 10 -delete  # reenvia e remove da DLQ
+```
+
+Cada reenvio usa `MessageDeduplicationId` **novo** (UUID); reexecuções são
+inofensivas, pois o serviço deduplica financeiramente por
+`(providerId, idempotencyKey)` e pela inbox. O corpo é reenviado verbatim; o
+`FailureCode` original é preservado como atributo informativo.
 
 ## Configuração
 

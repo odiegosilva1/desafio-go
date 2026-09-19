@@ -3,7 +3,7 @@ GOFORMAT_FILES := $(shell gofmt -l .)
 export PATH := $(HOME)/.local/bin:$(PATH)
 export AWS_ENDPOINT_URL ?= http://localhost:4566
 
-.PHONY: fmt vet build test test-race check run up infra down db-up db-down migrate test-integration test-race-integration integration-setup integration-teardown integration-check provision e2e e2e-clean
+.PHONY: fmt vet build test test-race check run up infra down db-up db-down migrate test-integration test-race-integration integration-setup integration-teardown integration-check provision e2e e2e-clean producer replay e2e-scenario
 
 fmt:
 	@if [ -n "$(GOFORMAT_FILES)" ]; then \
@@ -62,6 +62,19 @@ migrate:
 # --- SQS: provisionamento idempotente das filas no LocalStack ---
 provision:
 	bash deploy/localstack/provision-sqs.sh
+
+# --- Ferramentas de operação (producer / replay DLQ) ---
+# Ex.: make producer ARGS='wager -wallet w-1 -player p-1 -round r-1 -game g-1'
+producer:
+	go run ./cmd/producer $(ARGS)
+
+# Ex.: make replay ARGS='scan -limit 10'
+replay:
+	go run ./cmd/replay $(ARGS)
+
+# Cenário E2E do pipeline SQS (requer `make infra` + aplicação no ar).
+e2e-scenario:
+	bash deploy/e2e/scenario.sh
 
 # --- Testes de integração (build tag `integration`; exigem Postgres up) ---
 # Serializados (-p 1): os pacotes resetam o mesmo banco local.

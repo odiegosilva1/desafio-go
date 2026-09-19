@@ -4,6 +4,10 @@
 *.exe
 *.test
 *.out
+/producer
+/replay
+/wallet-service
+/wallet-migrate
 
 # Ambiente e segredos
 .env

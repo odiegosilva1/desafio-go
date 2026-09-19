@@ -103,6 +103,29 @@ que torna o replay idempotente nas duas portas.
   operação **na mesma transação**; commit único garante exactly-once no broker+
   banco (reentrega vira duplicata da inbox/replay idempotente).
 
+## Mensageria — wire e convenções FIFO
+
+- **Wire (entrada)**: o corpo é o envelope do §10 do specs
+  (`messageId`, `type`, `occurredAt`, `data`). O tipo `InboundEnvelope`
+  compartilhado em `internal/messaging` é usado pelo consumidor, pelo
+  `cmd/producer` e pelo replay da DLQ — um único contrato serializado
+  (`MarshalInbound`/`ParseEnvelope`), testado compatível com o exemplo do
+  specs.
+- **`MessageGroupId` da entrada = `data.walletId`**: preserva a ordem por
+  carteira (importante para o lock serializado por carteira).
+- **`MessageDeduplicationId` da entrada = `messageId`** do envelope (default do
+  producer; a janela de deduplicação do SQS cobre republicações).
+- **Replay da DLQ** (`cmd/replay`): reenvia o corpo **verbatim** com
+  `MessageGroupId = data.walletId` e **`MessageDeduplicationId` novo** (UUID)
+  para não colidir com a janela de 5 min do envio original. Reexecuções são
+  inofensivas: a deduplicação financeira por `(providerId, idempotencyKey)` e a
+  inbox tornam o segundo processamento um no-op. Corpo ilegível é reenviado
+  verbatim (grupo `wager-dlq`) e volta à DLQ como `INVALID_MESSAGE`;
+  `FailureCode` original é preservado como atributo informativo.
+- **Concorrência HTTP × SQS**: entradas HTTP e SQS compartilham o mesmo caso de
+  uso e as mesmas chaves únicas; a primeira que comitar define o efeito, a
+  segunda é deduplicada (idempotência persistente).
+
 ## Reversões e PENDING_REFERENCE
 
 - **REFUND** sobre BET e **ROLLBACK** sobre BET/WIN/REFUND, com validação de
