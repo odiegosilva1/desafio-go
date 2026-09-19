@@ -42,9 +42,20 @@ func (u *unitOfWork) Run(ctx context.Context, fn func(ctx context.Context, tx po
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
 	if err := fn(ctx, &pgxTx{tx: tx}); err != nil {
-		return err
+		return mapRetryable(err)
 	}
-	return tx.Commit(ctx)
+	return mapRetryable(tx.Commit(ctx))
+}
+
+// mapRetryable converte falhas de serialização/impasses do Postgres (40001,
+// 40P01) no sentinela retryável da aplicação. Sob alta concorrência na mesma
+// carteira, inserções paralelas nos mesmos índices únicos podem gerar impasses
+// legítimos; o caso de uso retenta um número limitado de vezes.
+func mapRetryable(err error) error {
+	if isSerializationFailure(err) {
+		return port.ErrConcurrentUpdate
+	}
+	return err
 }
 
 // RunRepeatableRead inicia em REPEATABLE READ READ ONLY para a reconciliação,

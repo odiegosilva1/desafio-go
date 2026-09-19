@@ -62,7 +62,8 @@ func isRetryableConcurrency(err error) bool {
 	if errors.Is(err, port.ErrConcurrentUpdate) {
 		return true
 	}
-	return false
+	// Wrap de infraestrutura (ex.: impasse 40P01) também é retryável.
+	return derr.IsRetryable(err)
 }
 
 // run retry executa fn dentro de uma transação, retentando um número limitado

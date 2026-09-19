@@ -69,6 +69,11 @@ que torna o replay idempotente nas duas portas.
 - `UpdateBalance` ainda valida `version = versão_lida+1` (esperança otimista):
   se filas de escrita não respeitarem o lock, o conflito é detectado e o caso
   de uso classifica como `transient` (retry).
+- Sob alta concorrência na mesma carteira, inserções paralelas nos mesmos
+  índices únicos podem gerar impasses (SQLSTATE 40P01). A UOW converte
+  `40001`/`40P01` em `ErrConcurrentUpdate` (`mapRetryable`), e o caso de uso
+  retenta com relock por carteira um número limitado de vezes; o consumidor
+  SQS ainda reentrega a mensagem após falha transitória.
 
 ## Idempotência e integração
 

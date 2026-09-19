@@ -78,7 +78,7 @@ func (s *outboxStore) MarkPublished(ctx context.Context, sc port.TxScope, eventI
 	// não é erro: o eventId foi preservado.
 	_, err := fromScope(sc).Exec(ctx, `
 UPDATE outbox
-   SET status = 'PUBLISHED', published_at = $3, published_by = $4
- WHERE id = $1 AND status = 'PENDING'`, eventID, now, publishedBy)
+   SET status = 'PUBLISHED', published_at = $2, published_by = $3
+  WHERE id = $1 AND status = 'PENDING'`, eventID, now, publishedBy)
 	return err
 }
