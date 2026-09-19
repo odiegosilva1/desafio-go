@@ -23,9 +23,9 @@ func TestWalletBalanceChangedConstructor(t *testing.T) {
 			WalletID:      "wallet-1",
 			TransactionID: "tx-1",
 			Direction:     DirectionDebit,
-			Money:         moneyJSON{Amount: "25.00", Currency: "BRL"},
-			BalanceBefore: moneyJSON{Amount: "100.00", Currency: "BRL"},
-			BalanceAfter:  moneyJSON{Amount: "75.00", Currency: "BRL"},
+			Money:         MoneyJSON{Amount: "25.00", Currency: "BRL"},
+			BalanceBefore: MoneyJSON{Amount: "100.00", Currency: "BRL"},
+			BalanceAfter:  MoneyJSON{Amount: "75.00", Currency: "BRL"},
 			WalletVersion: 2,
 		},
 	)
@@ -78,7 +78,7 @@ func TestProcessedAndRejectedConstructors(t *testing.T) {
 			RoundID:                        "round-987",
 			GameID:                         "fortune-chimp",
 			Kind:                           "BET",
-			Money:                          moneyJSON{Amount: "25.00", Currency: "BRL"},
+			Money:                          MoneyJSON{Amount: "25.00", Currency: "BRL"},
 			ReferenceExternalTransactionID: "",
 			WalletVersion:                  2,
 		})

@@ -51,6 +51,7 @@ var (
 	ErrReferenceNotProcessed     = Newf(ClassBusinessRule, CodeReferenceNotProcessed, "referência ainda não foi concluída com sucesso")
 	ErrDuplicateReversal         = Newf(ClassBusinessRule, CodeDuplicateReversal, "referência já sofreu reversão do mesmo tipo")
 	ErrReversalMismatch          = Newf(ClassBusinessRule, CodeReversalMismatch, "reversão não compatível com a operação referenciada")
+	ErrWalletNotFound            = Newf(ClassBusinessRule, CodeWalletNotFound, "carteira não encontrada")
 
 	// Conflitos persistentes.
 	ErrWalletAlreadyExists = Newf(ClassConflict, CodeWalletAlreadyExists, "carteira já existe para o jogador e moeda")
@@ -80,6 +81,7 @@ const (
 	CodeDuplicateReversal         = "DUPLICATE_REVERSAL"
 	CodeReversalMismatch          = "REVERSAL_MISMATCH"
 	CodeWalletAlreadyExists       = "WALLET_ALREADY_EXISTS"
+	CodeWalletNotFound            = "WALLET_NOT_FOUND"
 	CodeIdempotencyConflict       = "IDEMPOTENCY_CONFLICT"
 	CodeReferencePending          = "REFERENCE_PENDING"
 	CodeTransient                 = "TRANSIENT"

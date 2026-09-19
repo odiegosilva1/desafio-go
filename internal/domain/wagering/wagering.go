@@ -83,6 +83,35 @@ type Effect struct {
 	ReferenceRequired bool
 }
 
+// Política de retomada de referências ainda indisponíveis (§7): máximo de
+// tentativas (TTL) e backoff exponencial com teto, aplicados a cada passada do
+// worker de referências.
+const (
+	// MaxReferenceAttempts é o limite de tentativas; ao ser atingido a
+	// operação é finalizada como REJECTED com referência não encontrada.
+	MaxReferenceAttempts = 5
+	// referenceBackoffBase é o atraso inicial da primeira tentativa.
+	referenceBackoffBase = time.Second
+	// referenceBackoffMax limita o intervalo entre tentativas.
+	referenceBackoffMax = 30 * time.Second
+)
+
+// ReferenceNextAttempt calcula o próximo instante de tentativa com backoff
+// exponencial: base * 2^(attempts-1), limitado ao teto.
+func ReferenceNextAttempt(attempts int, now time.Time) time.Time {
+	if attempts <= 0 {
+		return now
+	}
+	delay := referenceBackoffBase << (attempts - 1)
+	if delay > referenceBackoffMax {
+		delay = referenceBackoffMax
+	}
+	return now.Add(delay)
+}
+
+// IsReferenceExpired indica que o limite de tentativas (TTL) foi atingido.
+func IsReferenceExpired(attempts int) bool { return attempts >= MaxReferenceAttempts }
+
 // Erros de domínio do wagering.
 var (
 	ErrIDRequired         = errors.New("wagering: id is required")
@@ -93,6 +122,7 @@ var (
 	ErrRoundRequired      = errors.New("wagering: round id is required")
 	ErrGameRequired       = errors.New("wagering: game id is required")
 	ErrInvalidKind        = errors.New("wagering: invalid kind")
+	ErrInvalidAmount      = errors.New("wagering: BET/WIN/REFUND/ROLLBACK require a positive amount")
 	ErrNegativeAmount     = errors.New("wagering: amount must not be negative")
 	ErrLossRequiresZero   = errors.New("wagering: LOSS requires zero amount")
 	ErrOpeningInternal    = errors.New("wagering: OPENING is internal only")
@@ -105,28 +135,32 @@ var (
 
 // Transaction é uma operação de aposta com sua máquina de estados.
 type Transaction struct {
-	id              string
-	externalID      string
-	externalTxID    string
-	providerID      string
-	playerID        string
-	walletID        string
-	roundID         string
-	gameID          string
-	kind            Kind
-	money           money.Money
-	referenceExtID  string
-	idempotencyKey  string
-	correlationID   string
-	causationID     string
-	occurredAt      time.Time
-	firstRecordedAt time.Time
-	processedAt     *time.Time
-	failureCode     string
-	failureMessage  string
-	walletVersion   int
-	payloadHash     string
-	state           State
+	id                  string
+	externalID          string
+	externalTxID        string
+	providerID          string
+	playerID            string
+	walletID            string
+	roundID             string
+	gameID              string
+	kind                Kind
+	money               money.Money
+	referenceExtID      string
+	referenceInternalID string
+	idempotencyKey      string
+	correlationID       string
+	causationID         string
+	occurredAt          time.Time
+	firstRecordedAt     time.Time
+	processedAt         *time.Time
+	failureCode         string
+	failureMessage      string
+	walletVersion       int
+	payloadHash         string
+	state               State
+	attempts            int
+	nextAttemptAt       *time.Time
+	resultBalance       money.Money
 }
 
 // NewPendingOptions contém os campos de criação de uma transação PENDING.
@@ -181,15 +215,16 @@ func NewPending(opts NewPendingOptions) (Transaction, error) {
 	}
 
 	switch opts.Kind {
-	case KindBet, KindWin:
-		if opts.Money.IsNegative() {
-			return Transaction{}, derr.Wrap(derr.ClassInvalidInput, derr.CodeInvalidPayload, ErrNegativeAmount)
+	case KindBet, KindWin, KindRefund, KindRollback:
+		if opts.Money.IsNegative() || opts.Money.IsZero() {
+			return Transaction{}, derr.Wrap(derr.ClassInvalidInput, derr.CodeInvalidPayload, ErrInvalidAmount)
 		}
 	case KindLoss:
 		if !opts.Money.IsZero() {
 			return Transaction{}, derr.Wrap(derr.ClassInvalidInput, derr.CodeInvalidPayload, ErrLossRequiresZero)
 		}
-	case KindRefund, KindRollback:
+	}
+	if opts.Kind == KindRefund || opts.Kind == KindRollback {
 		if opts.ReferenceExtID == "" {
 			return Transaction{}, derr.Wrap(derr.ClassInvalidInput, derr.CodeInvalidPayload, ErrRefundRequiresRef)
 		}
@@ -223,30 +258,84 @@ func NewPending(opts NewPendingOptions) (Transaction, error) {
 	return t, nil
 }
 
+// OpeningOptions contém os campos de uma abertura interna de carteira
+// (OPENING). Provedor, ID externo, chave, hash, rodada, jogo e referência não
+// se aplicam a essa origem.
+type OpeningOptions struct {
+	ID            string
+	PlayerID      string
+	WalletID      string
+	Money         money.Money
+	OccurredAt    time.Time
+	RecordedAt    time.Time
+	WalletVersion int
+}
+
+// NewOpening cria a transação interna OPENING já em PROCESSED, usada pela
+// abertura de carteira com saldo positivo. É o único construtor que aceita o
+// tipo OPENING; o canal externo (HTTP/SQS) permanece bloqueado.
+func NewOpening(opts OpeningOptions) (Transaction, error) {
+	if opts.ID == "" {
+		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent, ErrIDRequired)
+	}
+	if opts.PlayerID == "" {
+		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent, ErrPlayerRequired)
+	}
+	if opts.WalletID == "" {
+		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent, ErrWalletRequired)
+	}
+	if opts.Money.IsNegative() {
+		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent, ErrNegativeAmount)
+	}
+	if opts.WalletVersion < 1 {
+		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent,
+			errors.New("wagering: opening requires walletVersion >= 1"))
+	}
+
+	processed := opts.OccurredAt
+	return Transaction{
+		id:              opts.ID,
+		playerID:        opts.PlayerID,
+		walletID:        opts.WalletID,
+		kind:            KindOpening,
+		money:           opts.Money,
+		occurredAt:      opts.OccurredAt,
+		firstRecordedAt: opts.RecordedAt,
+		processedAt:     &processed,
+		walletVersion:   opts.WalletVersion,
+		resultBalance:   opts.Money,
+		state:           StateProcessed,
+	}, nil
+}
+
 // RehydrateOptions contém os campos para reconstruir uma transação persistida
 // sem reaplicar transições de estado (reidratação).
 type RehydrateOptions struct {
-	ID             string
-	ExternalTxID   string
-	ProviderID     string
-	PlayerID       string
-	WalletID       string
-	RoundID        string
-	GameID         string
-	Kind           Kind
-	Money          money.Money
-	ReferenceExtID string
-	IdempotencyKey string
-	CorrelationID  string
-	CausationID    string
-	OccurredAt     time.Time
-	RecordedAt     time.Time
-	ProcessedAt    *time.Time
-	FailureCode    string
-	FailureMessage string
-	WalletVersion  int
-	PayloadHash    string
-	State          State
+	ID                  string
+	ExternalTxID        string
+	ProviderID          string
+	PlayerID            string
+	WalletID            string
+	RoundID             string
+	GameID              string
+	Kind                Kind
+	Money               money.Money
+	ReferenceExtID      string
+	ReferenceInternalID string
+	IdempotencyKey      string
+	CorrelationID       string
+	CausationID         string
+	OccurredAt          time.Time
+	RecordedAt          time.Time
+	ProcessedAt         *time.Time
+	FailureCode         string
+	FailureMessage      string
+	WalletVersion       int
+	PayloadHash         string
+	State               State
+	Attempts            int
+	NextAttemptAt       *time.Time
+	ResultBalance       money.Money
 }
 
 // Rehydrate reconstrói uma transação persistida, sem recalcular hash nem
@@ -259,29 +348,37 @@ func Rehydrate(opts RehydrateOptions) (Transaction, error) {
 		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent,
 			errors.New("wagering: invalid state"))
 	}
+	if opts.Attempts < 0 {
+		return Transaction{}, derr.Wrap(derr.ClassPermanent, derr.CodePermanent,
+			errors.New("wagering: negative attempts"))
+	}
 	return Transaction{
-		id:              opts.ID,
-		externalID:      opts.ExternalTxID,
-		externalTxID:    opts.ExternalTxID,
-		providerID:      opts.ProviderID,
-		playerID:        opts.PlayerID,
-		walletID:        opts.WalletID,
-		roundID:         opts.RoundID,
-		gameID:          opts.GameID,
-		kind:            opts.Kind,
-		money:           opts.Money,
-		referenceExtID:  opts.ReferenceExtID,
-		idempotencyKey:  opts.IdempotencyKey,
-		correlationID:   opts.CorrelationID,
-		causationID:     opts.CausationID,
-		occurredAt:      opts.OccurredAt,
-		firstRecordedAt: opts.RecordedAt,
-		processedAt:     opts.ProcessedAt,
-		failureCode:     opts.FailureCode,
-		failureMessage:  opts.FailureMessage,
-		walletVersion:   opts.WalletVersion,
-		payloadHash:     opts.PayloadHash,
-		state:           opts.State,
+		id:                  opts.ID,
+		externalID:          opts.ExternalTxID,
+		externalTxID:        opts.ExternalTxID,
+		providerID:          opts.ProviderID,
+		playerID:            opts.PlayerID,
+		walletID:            opts.WalletID,
+		roundID:             opts.RoundID,
+		gameID:              opts.GameID,
+		kind:                opts.Kind,
+		money:               opts.Money,
+		referenceExtID:      opts.ReferenceExtID,
+		referenceInternalID: opts.ReferenceInternalID,
+		idempotencyKey:      opts.IdempotencyKey,
+		correlationID:       opts.CorrelationID,
+		causationID:         opts.CausationID,
+		occurredAt:          opts.OccurredAt,
+		firstRecordedAt:     opts.RecordedAt,
+		processedAt:         opts.ProcessedAt,
+		failureCode:         opts.FailureCode,
+		failureMessage:      opts.FailureMessage,
+		walletVersion:       opts.WalletVersion,
+		payloadHash:         opts.PayloadHash,
+		state:               opts.State,
+		attempts:            opts.Attempts,
+		nextAttemptAt:       opts.NextAttemptAt,
+		resultBalance:       opts.ResultBalance,
 	}, nil
 }
 
@@ -329,15 +426,20 @@ func canonicalPayloadHash(s businessSnapshot) (string, error) {
 // --- Transições (todas validam estado terminal). ---
 
 // MarkPendingReference passa de PENDING para PENDING_REFERENCE (aguarda
-// referência ainda indisponível).
+// referência ainda indisponível), registrando a tentativa e o próximo instante
+// com backoff exponencial. Aceita re-armar uma transação já em
+// PENDING_REFERENCE (nova passada do worker que também precisa aguardar).
 func (t Transaction) MarkPendingReference(now time.Time) (Transaction, error) {
 	if t.state == StateProcessed || t.state == StateRejected || t.state == StateFailed {
 		return Transaction{}, ErrTerminalState
 	}
-	if t.state != StatePending {
-		return Transaction{}, errors.New("wagering: only PENDING can enter PENDING_REFERENCE")
+	if t.state != StatePending && t.state != StatePendingReference {
+		return Transaction{}, errors.New("wagering: only PENDING/PENDING_REFERENCE can enter PENDING_REFERENCE")
 	}
+	next := ReferenceNextAttempt(t.attempts+1, now)
 	nt := t
+	nt.attempts++
+	nt.nextAttemptAt = &next
 	nt.state = StatePendingReference
 	return nt, nil
 }
@@ -356,15 +458,36 @@ func (t Transaction) ResolveReference(now time.Time) (Transaction, error) {
 	return nt, nil
 }
 
-// Process conclui a transação com sucesso (terminal). O walletVersion e o
-// timestamp de processamento são registrados no snapshot.
-func (t Transaction) Process(walletVersion int, processedAt time.Time) (Transaction, error) {
+// AttachReference registra a referência interna resolvida (id da transação
+// PROCESSED referenciada) antes da conclusão da operação.
+func (t Transaction) AttachReference(referenceInternalID string) (Transaction, error) {
+	if t.IsTerminal() {
+		return Transaction{}, ErrTerminalState
+	}
+	if t.state != StatePending && t.state != StatePendingReference {
+		return Transaction{}, errors.New("wagering: reference can only attach on PENDING/PENDING_REFERENCE")
+	}
+	nt := t
+	nt.referenceInternalID = referenceInternalID
+	return nt, nil
+}
+
+// Process conclui a transação com sucesso (terminal). O walletVersion, o saldo
+// resultante (devolvido ao provedor) e o timestamp são registrados no snapshot.
+func (t Transaction) Process(walletVersion int, resultBalance money.Money, processedAt time.Time) (Transaction, error) {
 	if t.state == StateProcessed || t.state == StateRejected || t.state == StateFailed {
 		return Transaction{}, ErrTerminalState
+	}
+	if resultBalance.IsNegative() {
+		return Transaction{}, errors.New("wagering: negative result balance")
+	}
+	if !t.money.IsZero() && resultBalance.Currency() != t.money.Currency() {
+		return Transaction{}, errors.New("wagering: result balance currency mismatch")
 	}
 	nt := t
 	nt.state = StateProcessed
 	nt.walletVersion = walletVersion
+	nt.resultBalance = resultBalance
 	nt.processedAt = &processedAt
 	return nt, nil
 }
@@ -397,27 +520,31 @@ func (t Transaction) Fail(failureCode, message string, failedAt time.Time) (Tran
 
 // --- Acessores imutáveis. ---
 
-func (t Transaction) ID() string              { return t.id }
-func (t Transaction) ExternalID() string      { return t.externalTxID }
-func (t Transaction) ProviderID() string      { return t.providerID }
-func (t Transaction) PlayerID() string        { return t.playerID }
-func (t Transaction) WalletID() string        { return t.walletID }
-func (t Transaction) RoundID() string         { return t.roundID }
-func (t Transaction) GameID() string          { return t.gameID }
-func (t Transaction) Kind() Kind              { return t.kind }
-func (t Transaction) Money() money.Money      { return t.money }
-func (t Transaction) ReferenceExtID() string  { return t.referenceExtID }
-func (t Transaction) IdempotencyKey() string  { return t.idempotencyKey }
-func (t Transaction) CorrelationID() string   { return t.correlationID }
-func (t Transaction) CausationID() string     { return t.causationID }
-func (t Transaction) OccurredAt() time.Time   { return t.occurredAt }
-func (t Transaction) RecordedAt() time.Time   { return t.firstRecordedAt }
-func (t Transaction) ProcessedAt() *time.Time { return t.processedAt }
-func (t Transaction) FailureCode() string     { return t.failureCode }
-func (t Transaction) FailureMessage() string  { return t.failureMessage }
-func (t Transaction) WalletVersion() int      { return t.walletVersion }
-func (t Transaction) State() State            { return t.state }
-func (t Transaction) PayloadHash() string     { return t.payloadHash }
+func (t Transaction) ID() string                  { return t.id }
+func (t Transaction) ExternalID() string          { return t.externalTxID }
+func (t Transaction) ProviderID() string          { return t.providerID }
+func (t Transaction) PlayerID() string            { return t.playerID }
+func (t Transaction) WalletID() string            { return t.walletID }
+func (t Transaction) RoundID() string             { return t.roundID }
+func (t Transaction) GameID() string              { return t.gameID }
+func (t Transaction) Kind() Kind                  { return t.kind }
+func (t Transaction) Money() money.Money          { return t.money }
+func (t Transaction) ReferenceExtID() string      { return t.referenceExtID }
+func (t Transaction) ReferenceInternalID() string { return t.referenceInternalID }
+func (t Transaction) IdempotencyKey() string      { return t.idempotencyKey }
+func (t Transaction) CorrelationID() string       { return t.correlationID }
+func (t Transaction) CausationID() string         { return t.causationID }
+func (t Transaction) OccurredAt() time.Time       { return t.occurredAt }
+func (t Transaction) RecordedAt() time.Time       { return t.firstRecordedAt }
+func (t Transaction) ProcessedAt() *time.Time     { return t.processedAt }
+func (t Transaction) FailureCode() string         { return t.failureCode }
+func (t Transaction) FailureMessage() string      { return t.failureMessage }
+func (t Transaction) WalletVersion() int          { return t.walletVersion }
+func (t Transaction) State() State                { return t.state }
+func (t Transaction) PayloadHash() string         { return t.payloadHash }
+func (t Transaction) Attempts() int               { return t.attempts }
+func (t Transaction) NextAttemptAt() *time.Time   { return t.nextAttemptAt }
+func (t Transaction) ResultBalance() money.Money  { return t.resultBalance }
 func (t Transaction) IsTerminal() bool {
 	return t.state == StateProcessed || t.state == StateRejected || t.state == StateFailed
 }

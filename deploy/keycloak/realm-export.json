@@ -1,0 +1,211 @@
+{
+  "realm": "wallet",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "accessTokenLifespan": 1800,
+  "rememeberMe": false,
+  "roles": {
+    "client": {}
+  },
+  "clientScopes": [
+    {
+      "name": "wallet:provider",
+      "description": "Escopo de operações de provedor de jogos",
+      "protocol": "openid-connect",
+      "attributes": {
+        "consent.screen.text": "Operações de provedor de jogos",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "wallet:internal",
+      "description": "Escopo de operações internas do serviço de carteira",
+      "protocol": "openid-connect",
+      "attributes": {
+        "consent.screen.text": "Operações internas do serviço de carteira",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "wallet:admin",
+      "description": "Escopo administrativo (reconciliação e operações de auditoria)",
+      "protocol": "openid-connect",
+      "attributes": {
+        "consent.screen.text": "Operações administrativas",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": []
+    },
+    {
+      "name": "wallet-audience",
+      "description": "Adiciona o serviço de carteira como audience nos tokens",
+      "protocol": "openid-connect",
+      "attributes": {
+        "consent.screen.text": "Acesso à API de carteiras",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "wallet-service",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "defaultDefaultClientScopes": [
+    "role_list",
+    "profile",
+    "email",
+    "wallet-audience"
+  ],
+  "defaultOptionalClientScopes": [
+    "address",
+    "phone",
+    "offline_access",
+    "microprofile-jwt"
+  ],
+  "clients": [
+    {
+      "clientId": "wallet-service",
+      "name": "Serviço de carteiras (API)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "wallet-service-secret",
+      "protocolMappers": [
+        {
+          "name": "service-client-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "client_id",
+            "claim.value": "wallet-service",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "wallet-service-internal",
+      "name": "Serviço interno de carteira",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "wallet-internal-secret",
+      "protocolMappers": [
+        {
+          "name": "internal-client-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "client_id",
+            "claim.value": "wallet-service-internal",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "wallet:internal",
+        "wallet:admin"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "provider-a",
+      "name": "Provedor de jogos A",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "provider-a-secret",
+      "protocolMappers": [
+        {
+          "name": "provider-a-client-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "client_id",
+            "claim.value": "provider-a",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "wallet:provider",
+        "wallet-audience"
+      ],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "provider-b",
+      "name": "Provedor de jogos B",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "secret": "provider-b-secret",
+      "protocolMappers": [
+        {
+          "name": "provider-b-client-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-hardcoded-claim-mapper",
+          "consentRequired": false,
+          "config": {
+            "claim.name": "client_id",
+            "claim.value": "provider-b",
+            "jsonType.label": "String",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "wallet:provider",
+        "wallet-audience"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": []
+}

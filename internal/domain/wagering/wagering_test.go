@@ -116,7 +116,7 @@ func TestStateMachine(t *testing.T) {
 		t.Errorf("State = %q, want PENDING após resolução", back.State())
 	}
 
-	processed, err := back.Process(3, time.Now())
+	processed, err := back.Process(3, mustMoney(t, "75.00"), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +125,9 @@ func TestStateMachine(t *testing.T) {
 	}
 	if processed.WalletVersion() != 3 {
 		t.Errorf("WalletVersion = %d, want 3", processed.WalletVersion())
+	}
+	if processed.ResultBalance().Amount() != "75.00" {
+		t.Errorf("ResultBalance = %q, want 75.00", processed.ResultBalance().Amount())
 	}
 	if processed.IsTerminal() != true {
 		t.Error("PROCESSED deveria ser terminal")
@@ -170,11 +173,24 @@ func TestRejectAndFailAreTerminal(t *testing.T) {
 }
 
 func TestRehydrateRoundtrip(t *testing.T) {
+	processedAt := time.Now()
+	next := time.Now().Add(time.Second)
 	original, err := NewPending(NewPendingOptions{
 		ID: "tx-1", ExternalTxID: "e-1", ProviderID: "p", PlayerID: "pl",
 		WalletID: "w", RoundID: "r", GameID: "g", Kind: KindBet,
-		Money: mustMoney(t, "25.00"),
+		Money:          mustMoney(t, "25.00"),
+		OccurredAt:     time.Now(),
+		RecordedAt:     time.Now(),
+		IdempotencyKey: "k",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = original.AttachReference("ref-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err = original.Process(2, mustMoney(t, "75.00"), processedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,10 +201,14 @@ func TestRehydrateRoundtrip(t *testing.T) {
 		WalletID: original.WalletID(), RoundID: original.RoundID(),
 		GameID: original.GameID(), Kind: original.Kind(),
 		Money: original.Money(), ReferenceExtID: original.ReferenceExtID(),
-		IdempotencyKey: original.IdempotencyKey(),
-		CorrelationID:  original.CorrelationID(), CausationID: original.CausationID(),
+		ReferenceInternalID: original.ReferenceInternalID(),
+		IdempotencyKey:      original.IdempotencyKey(),
+		CorrelationID:       original.CorrelationID(), CausationID: original.CausationID(),
 		OccurredAt: original.OccurredAt(), RecordedAt: original.RecordedAt(),
+		ProcessedAt: original.ProcessedAt(), WalletVersion: original.WalletVersion(),
 		PayloadHash: original.PayloadHash(), State: original.State(),
+		Attempts: original.Attempts(), NextAttemptAt: &next,
+		ResultBalance: original.ResultBalance(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -198,6 +218,106 @@ func TestRehydrateRoundtrip(t *testing.T) {
 	}
 	if rehydrated.CausationID() != original.CausationID() {
 		t.Errorf("CausationID = %q, want %q", rehydrated.CausationID(), original.CausationID())
+	}
+	if rehydrated.ReferenceInternalID() != "ref-1" {
+		t.Errorf("ReferenceInternalID = %q, want ref-1", rehydrated.ReferenceInternalID())
+	}
+	if rehydrated.ResultBalance().Amount() != "75.00" {
+		t.Errorf("ResultBalance = %q, want 75.00", rehydrated.ResultBalance().Amount())
+	}
+	if !rehydrated.ProcessedAt().Equal(processedAt) {
+		t.Errorf("ProcessedAt = %v, want %v", rehydrated.ProcessedAt(), processedAt)
+	}
+	if !rehydrated.NextAttemptAt().Equal(next) {
+		t.Errorf("NextAttemptAt = %v, want %v", rehydrated.NextAttemptAt(), next)
+	}
+}
+
+func TestMarkPendingReferenceBackoff(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	tx, _ := NewPending(NewPendingOptions{
+		ID: "tx-1", ExternalTxID: "e-1", ProviderID: "p", PlayerID: "pl",
+		WalletID: "w", RoundID: "r", GameID: "g", Kind: KindRefund,
+		Money: mustMoney(t, "25.00"), ReferenceExtID: "orig-1",
+	})
+	pend, err := tx.MarkPendingReference(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pend.Attempts() != 1 {
+		t.Errorf("Attempts = %d, want 1", pend.Attempts())
+	}
+	wantNext := now.Add(time.Second)
+	if !pend.NextAttemptAt().Equal(wantNext) {
+		t.Errorf("NextAttemptAt = %v, want %v", pend.NextAttemptAt(), wantNext)
+	}
+	if !pend.IsWaitingForReference() {
+		t.Error("esperava PENDING_REFERENCE")
+	}
+}
+
+func TestReferenceExpiry(t *testing.T) {
+	if IsReferenceExpired(0) || IsReferenceExpired(3) {
+		t.Error("ainda não expirado")
+	}
+	if !IsReferenceExpired(MaxReferenceAttempts) {
+		t.Error("deveria ter expirado no limite de tentativas")
+	}
+}
+
+func TestNewOpeningInternal(t *testing.T) {
+	op, err := NewOpening(OpeningOptions{
+		ID: "op-1", PlayerID: "p", WalletID: "w",
+		Money: mustMoney(t, "100.00"), OccurredAt: time.Now(), RecordedAt: time.Now(),
+		WalletVersion: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Kind() != KindOpening {
+		t.Errorf("Kind = %q, want OPENING", op.Kind())
+	}
+	if op.State() != StateProcessed {
+		t.Errorf("State = %q, want PROCESSED", op.State())
+	}
+	if op.ProviderID() != "" || op.IdempotencyKey() != "" || op.PayloadHash() != "" {
+		t.Error("OPENING interno não deve carregar metadados externos")
+	}
+
+	// Canal externo continua bloqueado.
+	if _, err := NewPending(NewPendingOptions{
+		ID: "tx-1", ExternalTxID: "e-1", ProviderID: "p", PlayerID: "pl",
+		WalletID: "w", RoundID: "r", GameID: "g", Kind: KindOpening,
+		Money: mustMoney(t, "0.00"),
+	}); !errors.Is(err, ErrOpeningInternal) {
+		t.Errorf("err = %v, want ErrOpeningInternal", err)
+	}
+
+	// Validadores.
+	neg, err := money.FromUnits(money.CurrencyBRL, -100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewOpening(OpeningOptions{ID: "op", PlayerID: "p", WalletID: "w", Money: neg, WalletVersion: 1}); !errors.Is(err, ErrNegativeAmount) {
+		t.Errorf("err = %v, want ErrNegativeAmount", err)
+	}
+	if _, err := NewOpening(OpeningOptions{ID: "op", PlayerID: "p", Money: mustMoney(t, "1.00"), WalletVersion: 0}); err == nil {
+		t.Error("esperava erro para walletVersion < 1")
+	}
+}
+
+func TestAttachReferenceOnTerminalFails(t *testing.T) {
+	tx, _ := NewPending(NewPendingOptions{
+		ID: "tx-1", ExternalTxID: "e-1", ProviderID: "p", PlayerID: "pl",
+		WalletID: "w", RoundID: "r", GameID: "g", Kind: KindBet,
+		Money: mustMoney(t, "25.00"),
+	})
+	done, err := tx.Process(2, mustMoney(t, "75.00"), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := done.AttachReference("x"); !errors.Is(err, ErrTerminalState) {
+		t.Errorf("err = %v, want ErrTerminalState", err)
 	}
 }
 

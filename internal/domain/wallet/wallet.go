@@ -12,6 +12,8 @@ import (
 var (
 	// ErrIDRequired: identificador de carteira obrigatório.
 	ErrIDRequired = errors.New("wallet: id is required")
+	// ErrProviderRequired: provedor dono da carteira obrigatório.
+	ErrProviderRequired = errors.New("wallet: provider id is required")
 	// ErrPlayerRequired: identificador do jogador obrigatório.
 	ErrPlayerRequired = errors.New("wallet: player id is required")
 	// ErrCurrencyRequired: moeda obrigatória.
@@ -43,17 +45,18 @@ type Movement struct {
 	walletVersion int
 }
 
-// Wallet é a raiz do agregado financeiro. Encapsula identidade, jogador,
-// moeda, saldo, versão e instantes de criação/atualização. O saldo só muda
-// via Debit/Credit, sempre sob a guarda da carteira e da transação SQL.
+// Wallet é a raiz do agregado financeiro. Encapsula identidade, provedor,
+// jogador, moeda, saldo, versão e instantes de criação/atualização. O saldo só
+// muda via Debit/Credit, sempre sob a guarda da carteira e da transação SQL.
 type Wallet struct {
-	id        string
-	playerID  string
-	currency  money.Currency
-	balance   money.Money
-	version   int
-	createdAt time.Time
-	updatedAt time.Time
+	id         string
+	providerID string
+	playerID   string
+	currency   money.Currency
+	balance    money.Money
+	version    int
+	createdAt  time.Time
+	updatedAt  time.Time
 }
 
 // initialVersion é a versão da carteira recém-aberta.
@@ -63,13 +66,16 @@ const initialVersion = 1
 // incrementa a versão (o versionamento inicia após a criação). O lançamento de
 // ledger de abertura é materializado pelo caso de uso.
 func Open(
-	id, playerID string,
+	id, providerID, playerID string,
 	currency money.Currency,
 	initialBalance money.Money,
 	now time.Time,
 ) (Wallet, Movement, error) {
 	if strings.TrimSpace(id) == "" {
 		return Wallet{}, Movement{}, ErrIDRequired
+	}
+	if strings.TrimSpace(providerID) == "" {
+		return Wallet{}, Movement{}, ErrProviderRequired
 	}
 	if strings.TrimSpace(playerID) == "" {
 		return Wallet{}, Movement{}, ErrPlayerRequired
@@ -82,13 +88,14 @@ func Open(
 	}
 
 	w := Wallet{
-		id:        id,
-		playerID:  playerID,
-		currency:  currency,
-		balance:   initialBalance,
-		version:   initialVersion,
-		createdAt: now.UTC(),
-		updatedAt: now.UTC(),
+		id:         id,
+		providerID: providerID,
+		playerID:   playerID,
+		currency:   currency,
+		balance:    initialBalance,
+		version:    initialVersion,
+		createdAt:  now.UTC(),
+		updatedAt:  now.UTC(),
 	}
 	if initialBalance.IsZero() {
 		return w, Movement{}, nil
@@ -106,7 +113,7 @@ func Open(
 // Rehydrate reconstrói uma carteira já persistida, sem reaplicar movimentações
 // nem transições de estado. Valida os campos e preserva a versão.
 func Rehydrate(
-	id, playerID string,
+	id, providerID, playerID string,
 	currency money.Currency,
 	balance money.Money,
 	version int,
@@ -114,6 +121,9 @@ func Rehydrate(
 ) (Wallet, error) {
 	if version < initialVersion {
 		return Wallet{}, ErrInvalidVersion
+	}
+	if providerID == "" {
+		return Wallet{}, ErrProviderRequired
 	}
 	if currency == "" || len(currency) != 3 {
 		return Wallet{}, ErrCurrencyRequired
@@ -123,13 +133,14 @@ func Rehydrate(
 	}
 
 	return Wallet{
-		id:        id,
-		playerID:  playerID,
-		currency:  currency,
-		balance:   balance,
-		version:   version,
-		createdAt: createdAt.UTC(),
-		updatedAt: updatedAt.UTC(),
+		id:         id,
+		providerID: providerID,
+		playerID:   playerID,
+		currency:   currency,
+		balance:    balance,
+		version:    version,
+		createdAt:  createdAt.UTC(),
+		updatedAt:  updatedAt.UTC(),
 	}, nil
 }
 
@@ -158,13 +169,14 @@ func (w Wallet) Debit(transactionID string, amount money.Money, t time.Time) (Wa
 
 	version := w.version + 1
 	return Wallet{
-			id:        w.id,
-			playerID:  w.playerID,
-			currency:  w.currency,
-			balance:   after,
-			version:   version,
-			createdAt: w.createdAt,
-			updatedAt: t.UTC(),
+			id:         w.id,
+			providerID: w.providerID,
+			playerID:   w.playerID,
+			currency:   w.currency,
+			balance:    after,
+			version:    version,
+			createdAt:  w.createdAt,
+			updatedAt:  t.UTC(),
 		},
 		Movement{
 			walletID:      w.id,
@@ -195,13 +207,14 @@ func (w Wallet) Credit(transactionID string, amount money.Money, t time.Time) (W
 
 	version := w.version + 1
 	return Wallet{
-			id:        w.id,
-			playerID:  w.playerID,
-			currency:  w.currency,
-			balance:   after,
-			version:   version,
-			createdAt: w.createdAt,
-			updatedAt: t.UTC(),
+			id:         w.id,
+			providerID: w.providerID,
+			playerID:   w.playerID,
+			currency:   w.currency,
+			balance:    after,
+			version:    version,
+			createdAt:  w.createdAt,
+			updatedAt:  t.UTC(),
 		},
 		Movement{
 			walletID:      w.id,
@@ -219,6 +232,9 @@ func (w Wallet) Credit(transactionID string, amount money.Money, t time.Time) (W
 
 // ID retorna o identificador da carteira.
 func (w Wallet) ID() string { return w.id }
+
+// ProviderID retorna o provedor dono da carteira.
+func (w Wallet) ProviderID() string { return w.providerID }
 
 // PlayerID retorna o jogador dono da carteira.
 func (w Wallet) PlayerID() string { return w.playerID }
@@ -241,6 +257,7 @@ func (w Wallet) UpdatedAt() time.Time { return w.updatedAt }
 // Equals compara duas carteiras por todas as propriedades.
 func (w Wallet) Equals(o Wallet) bool {
 	return w.id == o.id &&
+		w.providerID == o.providerID &&
 		w.playerID == o.playerID &&
 		w.currency == o.currency &&
 		w.balance.Equals(o.balance) &&
