@@ -3,7 +3,6 @@ package messaging
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -22,34 +21,6 @@ import (
 
 // consumerName identifica a inbox do consumidor de operações SQS.
 const consumerName = "sqs-wager-transactions"
-
-// MoneyJSON é o formato monetário no corpo da mensagem.
-type MoneyJSON struct {
-	Amount   string `json:"amount"`
-	Currency string `json:"currency"`
-}
-
-// inboundEnvelope é o corpo das mensagens recebidas da fila de operações.
-type inboundEnvelope struct {
-	MessageID  string           `json:"messageId"`
-	Type       string           `json:"type"`
-	OccurredAt time.Time        `json:"occurredAt"`
-	Data       inboundWagerData `json:"data"`
-}
-
-type inboundWagerData struct {
-	ProviderID                     string    `json:"providerId"`
-	ExternalTransactionID          string    `json:"externalTransactionId"`
-	IdempotencyKey                 string    `json:"idempotencyKey"`
-	PlayerID                       string    `json:"playerId"`
-	WalletID                       string    `json:"walletId"`
-	RoundID                        string    `json:"roundId"`
-	GameID                         string    `json:"gameId"`
-	Kind                           string    `json:"kind"`
-	Money                          MoneyJSON `json:"money"`
-	ReferenceExternalTransactionID string    `json:"referenceExternalTransactionId,omitempty"`
-	CorrelationID                  string    `json:"correlationId,omitempty"`
-}
 
 // Consumer consome a fila wager-transactions.fifo com a garantia de que o
 // registro da inbox e o tratamento durável compartilham a mesma transação. A
@@ -140,7 +111,7 @@ func (c *Consumer) handleMessage(ctx context.Context, msg types.Message) {
 	tctx := observability.WithTrace(ctx, observability.Trace{MessageID: messageID})
 	hash := sha256Sum(body)
 
-	envelope, err := parseEnvelope(body)
+	envelope, err := ParseEnvelope(body)
 	if err != nil {
 		// Mensagem inválida: falha permanente, não corrigível por retry → DLQ.
 		observability.Warn(tctx, c.logger, "invalid sqs message", "error", err.Error())
@@ -262,20 +233,9 @@ func sha256Sum(body string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-func parseEnvelope(body string) (inboundEnvelope, error) {
-	var env inboundEnvelope
-	if err := json.Unmarshal([]byte(body), &env); err != nil {
-		return env, fmt.Errorf("messaging: malformed envelope: %w", err)
-	}
-	if env.MessageID == "" || env.Data.ExternalTransactionID == "" {
-		return env, fmt.Errorf("messaging: missing messageId/externalTransactionId")
-	}
-	return env, nil
-}
-
 // toProcessInput converte o envelope em ProcessInput do caso de uso. Erros
 // indicam entrada inválida (validações de domínio equivalentes ao HTTP).
-func toProcessInput(env inboundEnvelope) (wagering.Transaction, error) {
+func toProcessInput(env InboundEnvelope) (wagering.Transaction, error) {
 	d := env.Data
 	if d.IdempotencyKey == "" {
 		return wagering.Transaction{}, derr.ErrMissingIdempotencyKey

@@ -73,3 +73,10 @@ func resolveQueueURL(ctx context.Context, client SQSClient, queueName string) (s
 	}
 	return *out.QueueUrl, nil
 }
+
+// ResolveQueueURL resolve uma única fila FIFO pelo nome, criando-a se
+// necessário (operação idempotente). Usada pelas ferramentas de operação que
+// não precisam provisionar o pipeline completo.
+func ResolveQueueURL(ctx context.Context, client SQSClient, queueName string) (string, error) {
+	return ensureFIFOQueue(ctx, client, queueName, nil)
+}

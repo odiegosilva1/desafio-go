@@ -105,6 +105,21 @@ func Load() (Config, error) {
 	return c, nil
 }
 
+// LoadAWS lê apenas a subconfiguração de AWS das variáveis de ambiente, sem as
+// validações de PostgreSQL/OIDC. Usada pelas ferramentas de operação
+// (cmd/producer e o replay da DLQ) que não dependem do IdP nem do banco.
+func LoadAWS() AWSConfig {
+	return AWSConfig{
+		EndpointURL: env("AWS_ENDPOINT_URL", ""),
+		Region:      env("AWS_REGION", "us-east-1"),
+		InputQueue:  env("AWS_SQS_QUEUE", "wager-transactions.fifo"),
+		DLQ:         env("AWS_SQS_DLQ", "wager-transactions-dlq.fifo"),
+		EventQueue:  env("AWS_SQS_EVENT_QUEUE", "wallet-events.fifo"),
+		AccessKey:   env("AWS_ACCESS_KEY_ID", ""),
+		SecretKey:   env("AWS_SECRET_ACCESS_KEY", ""),
+	}
+}
+
 func (c Config) validate() error {
 	var errs []string
 	if strings.TrimSpace(c.DatabaseURL) == "" {
