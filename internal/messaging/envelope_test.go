@@ -29,8 +29,8 @@ func specEnvelope() InboundEnvelope {
 	}
 }
 
-// TestMarshalInboundCanonical garante que o producer emite exatamente o JSON
-// canônico do specs (mesmas chaves e ordenação) consumido pelo serviço.
+// TestMarshalInboundCanonical garante que o wire de entrada emite exatamente o
+// JSON canônico do specs (mesmas chaves e ordenação) consumido pelo serviço.
 func TestMarshalInboundCanonical(t *testing.T) {
 	body, err := MarshalInbound(specEnvelope())
 	if err != nil {
@@ -59,8 +59,8 @@ func TestParseEnvelopeRejects(t *testing.T) {
 	}
 }
 
-// TestRoundTripToProcessInput garante compatibilidade wire: o que o producer
-// enfileira é exatamente o que o consumidor decodifica para o ProcessInput.
+// TestRoundTripToProcessInput garante compatibilidade wire: o que é enfileirado
+// é exatamente o que o consumidor decodifica para o ProcessInput.
 func TestRoundTripToProcessInput(t *testing.T) {
 	env := specEnvelope()
 	body, err := MarshalInbound(env)

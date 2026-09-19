@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"time"
 
-	"desafio-go/internal/domain/event"
 	"desafio-go/internal/domain/ledger"
 	"desafio-go/internal/domain/money"
 	"desafio-go/internal/domain/wagering"
@@ -135,6 +134,3 @@ type healthResponse struct {
 	Service string            `json:"service"`
 	Time    time.Time         `json:"time"`
 }
-
-// envelopeJSON é usado apenas para referência de documentação dos eventos.
-type envelopeJSON = event.Envelope

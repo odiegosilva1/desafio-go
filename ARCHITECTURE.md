@@ -107,21 +107,12 @@ que torna o replay idempotente nas duas portas.
 
 - **Wire (entrada)**: o corpo é o envelope do §10 do specs
   (`messageId`, `type`, `occurredAt`, `data`). O tipo `InboundEnvelope`
-  compartilhado em `internal/messaging` é usado pelo consumidor, pelo
-  `cmd/producer` e pelo replay da DLQ — um único contrato serializado
-  (`MarshalInbound`/`ParseEnvelope`), testado compatível com o exemplo do
-  specs.
+  compartilhado em `internal/messaging` define o contrato serializado usado pelo
+  consumidor (`ParseEnvelope`), testado compatível com o exemplo do specs.
 - **`MessageGroupId` da entrada = `data.walletId`**: preserva a ordem por
   carteira (importante para o lock serializado por carteira).
-- **`MessageDeduplicationId` da entrada = `messageId`** do envelope (default do
-  producer; a janela de deduplicação do SQS cobre republicações).
-- **Replay da DLQ** (`cmd/replay`): reenvia o corpo **verbatim** com
-  `MessageGroupId = data.walletId` e **`MessageDeduplicationId` novo** (UUID)
-  para não colidir com a janela de 5 min do envio original. Reexecuções são
-  inofensivas: a deduplicação financeira por `(providerId, idempotencyKey)` e a
-  inbox tornam o segundo processamento um no-op. Corpo ilegível é reenviado
-  verbatim (grupo `wager-dlq`) e volta à DLQ como `INVALID_MESSAGE`;
-  `FailureCode` original é preservado como atributo informativo.
+- **`MessageDeduplicationId` da entrada = `messageId`** do envelope; a janela de
+  deduplicação de 5 min do SQS cobre republicações na entrada.
 - **Concorrência HTTP × SQS**: entradas HTTP e SQS compartilham o mesmo caso de
   uso e as mesmas chaves únicas; a primeira que comitar define o efeito, a
   segunda é deduplicada (idempotência persistente).
@@ -192,9 +183,8 @@ que torna o replay idempotente nas duas portas.
 - **Contrato da DLQ (interpretação do §10)**: apenas **falha permanente**,
   **payload inválido** ou tentativas esgotadas vão à DLQ. Rejeições definitivas
   de negócio (saldo insuficiente, carteira inexistente, reversão duplicada) são
-  **terminais**: confirmadas na inbox com o `FailureCode` e a mensagem é
-  removida da fila sem efeito financeiro. Validado em `test/faults` e no
-  `deploy/e2e/scenario.sh`.
+**terminais**: confirmadas na inbox com o `FailureCode` e a mensagem é
+   removida da fila sem efeito financeiro. Validado em `test/faults`.
 - **Autorização por identidade do cliente, não por escopo**: o `client_id` do
   JWT é o `providerId` (decisão do §2). Os escopos `wallet:provider`,
   `wallet:internal` e `wallet:admin` são definidos e emitidos pelo IdP, mas o
@@ -206,9 +196,9 @@ que torna o replay idempotente nas duas portas.
   ao negócio é `client_credentials` de um cliente-provedor; nenhum usuário
   humano autentica na API.
 - **Idempotência da inbox por SQS MessageId**: reentregas do mesmo envio são
-  deduplicadas pela inbox. O replay da DLQ usa **novo** SQS MessageId; a
-  reexecução é inofensiva porque a deduplicação financeira é por
-  `(providerId, idempotencyKey)` — os dois níveis somados garantem exactly-once.
+  deduplicadas pela inbox. A deduplicação financeira é por
+  `(providerId, idempotencyKey)`, o que torna inofensiva uma reexecução com
+  `MessageId` novo — os dois níveis somados garantem exactly-once.
 - **Janela de republicação da outbox**: a publicação acontece **antes** do
   commit do `MarkPublished`. Uma falha entre publicar e confirmar reformata o
   registro PENDING e republica — seguro porque o `eventId` é estável e o destino
@@ -220,12 +210,11 @@ que torna o replay idempotente nas duas portas.
   resolvida no banco (`FOR UPDATE SKIP LOCKED` em carteira/outbox/referências);
   a regra FIFO por `walletId` preserva a ordem por carteira.
 - **Não executado neste ambiente**: `docker compose up` (LocalStack, Keycloak)
-  e o `deploy/e2e/scenario.sh` dependem de Docker, indisponível no ambiente de
-  desenvolvimento (permissão em `/var/run/docker.sock`). A malha foi validada
-  por integração com fake SQS/OIDC; as ferramentas `producer`/`replay` são
-  funcionais e cobertas por testes unit.
+  depende de Docker, indisponível no ambiente de desenvolvimento (permissão em
+  `/var/run/docker.sock`). A malha HTTP+SQS+outbox foi validada por integração
+  com fake SQS/OIDC contra o Postgres real.
 - **Trabalho não concluído (roadmap)**: observabilidade refinada (traços,
-  dashboards), contratos OpenAPI publicados e CI/CD + reconciliação **periódica**
-  (a reconciliação **pontual** por carteira existe: `POST /wallets/{id}/reconciliation`).
+  dashboards) e **CI/CD + reconciliação **periódica** (a reconciliação
+  **pontual** por carteira existe: `POST /wallets/{id}/reconciliation`).
 - **`make check` cobre os comandos §15**: `go vet ./...`, `go test ./...` e
   `go test -race ./...`; `make up` equivale a `docker compose up --build`.

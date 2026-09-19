@@ -13,8 +13,7 @@ type MoneyJSON struct {
 }
 
 // InboundEnvelope é o corpo das mensagens recebidas da fila de operações.
-// Tipo exportado para que as ferramentas de operação (cmd/producer e o replay
-// da DLQ) produzam mensagens compatíveis com o mesmo wire do consumidor.
+// Tipo exportado para manter o contrato serializado do wire do consumidor.
 type InboundEnvelope struct {
 	MessageID  string           `json:"messageId"`
 	Type       string           `json:"type"`

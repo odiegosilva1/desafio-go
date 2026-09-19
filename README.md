@@ -13,17 +13,15 @@ autenticação OAuth 2.0/OIDC via Keycloak.
 ```
 cmd/server/               entrada da aplicação e sinalização
 cmd/migrate/              CLI de migrations (up|down)
-cmd/producer/             injeta transações em wager-transactions.fifo
-cmd/replay/               inspeciona e recupera a DLQ
 internal/domain/          domínio puro (money, ledger, wagering, wallet, event, derr)
 internal/application/     casos de uso, referências, outbox e reconciliação
 internal/storage/         port (interfaces) + postgres (pgx, migrações)
-internal/httpapi/         contratos HTTP, middlewares de auth e handlers
+internal/httpapi/         handlers HTTP, middlewares de auth e contratos
 internal/auth/            validação OIDC e autorização por provedor
 internal/messaging/       consumidor SQS + inbox, publisher, envelopes e provisionamento
 internal/app/             módulos Fx, ciclo de vida e migrations embutidas
 internal/observability/   logs JSON, métricas e health checks
-deploy/                   realm Keycloak, filas SQS e cenários E2E
+deploy/                   realm Keycloak e provisionamento das filas SQS
 ```
 
 ## Fluxo de trabalho (Git Flow)
@@ -52,49 +50,9 @@ make migrate            # aplica migrations (up, default)
 make migrate ARGS=down  # reverte migrations (até a versão anterior)
 make test-integration   # integração (exige Postgres; usa -p 1)
 make integration-check  # db-up + integração + race + db-down
-make producer ARGS='...'# enfileira mensagens em wager-transactions.fifo
-make replay ARGS='...'  # scan/requeue da DLQ
-make e2e-scenario       # rejeição terminal + payload inválido→DLQ→replay
 make e2e                # up + run (malha completa HTTP+SQS+Keycloak)
 make down               # derruba a infra
 ```
-
-## Ferramentas de operação (SQS)
-
-### `cmd/producer` — injetar transações em `wager-transactions.fifo`
-
-Produz mensagens com o mesmo wire do consumidor (`internal/messaging`). O
-envelope é o JSON definido no §10 do `specs.md`:
-
-```sh
-# Constrói e enfileira um BET
-go run ./cmd/producer wager -wallet <walletId> -player <playerId> \
-  -round <roundId> -game <gameId> -kind BET -amount 25.00
-
-# Envia envelopes prontos (objeto ou lista JSON), da stdin ou de arquivo
-go run ./cmd/producer send -file envelope.json
-
-# Imprime um envelope de exemplo
-go run ./cmd/producer sample
-```
-
-Convenções FIFO (documentadas também em `ARCHITECTURE.md` §mensageria):
-- `MessageGroupId = data.walletId` — preserva a ordem por carteira.
-- `MessageDeduplicationId = messageId` do envelope (estável na janela de 5 min).
-- `-repeat N` regenera o `messageId` por cópia (exige-o vazio no arquivo), para
-  cenários de concorrência na mesma carteira.
-
-### `cmd/replay` — DLQ `wager-transactions-dlq.fifo`
-
-```sh
-go run ./cmd/replay scan -limit 10        # inspeciona sem destruir
-go run ./cmd/replay requeue -limit 10 -delete  # reenvia e remove da DLQ
-```
-
-Cada reenvio usa `MessageDeduplicationId` **novo** (UUID); reexecuções são
-inofensivas, pois o serviço deduplica financeiramente por
-`(providerId, idempotencyKey)` e pela inbox. O corpo é reenviado verbatim; o
-`FailureCode` original é preservado como atributo informativo.
 
 ## Fluxos autenticados (Keycloak) e exemplos de chamadas
 
@@ -219,6 +177,6 @@ Usam o **Postgres real** e um `fakeSQS` que implementa a interface
 - `TestOutboxPublisherSurvivesInstanceChange` — outra instância retoma registros
   herdados sem republicar os já confirmados (`published_by` por instância).
 
-Contrato de DLQ (validado nos testes e no `deploy/e2e/scenario.sh`): apenas
-**falha permanente**, **payload inválido** ou tentativas esgotadas vão à DLQ;
-rejeições de negócio são confirmadas no inbox e removidas da fila.
+Contrato de DLQ (validado nos testes de falha): apenas **falha permanente**,
+**payload inválido** ou tentativas esgotadas vão à DLQ; rejeições de negócio são
+confirmadas no inbox e removidas da fila.

@@ -106,8 +106,7 @@ func Load() (Config, error) {
 }
 
 // LoadAWS lê apenas a subconfiguração de AWS das variáveis de ambiente, sem as
-// validações de PostgreSQL/OIDC. Usada pelas ferramentas de operação
-// (cmd/producer e o replay da DLQ) que não dependem do IdP nem do banco.
+// validações de PostgreSQL/OIDC.
 func LoadAWS() AWSConfig {
 	return AWSConfig{
 		EndpointURL: env("AWS_ENDPOINT_URL", ""),
