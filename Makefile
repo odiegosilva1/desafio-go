@@ -3,7 +3,7 @@ GOFORMAT_FILES := $(shell gofmt -l .)
 export PATH := $(HOME)/.local/bin:$(PATH)
 export AWS_ENDPOINT_URL ?= http://localhost:4566
 
-.PHONY: fmt vet build test test-race check run up down db-up db-down test-integration test-race-integration integration-setup integration-teardown integration-check provision e2e e2e-clean
+.PHONY: fmt vet build test test-race check run up infra down db-up db-down migrate test-integration test-race-integration integration-setup integration-teardown integration-check provision e2e e2e-clean
 
 fmt:
 	@if [ -n "$(GOFORMAT_FILES)" ]; then \
@@ -36,6 +36,12 @@ up:
 	docker compose up --build -d
 	$(MAKE) provision
 
+# Apenas a infraestrutura (sem a aplicação containerizada), para desenvolver
+# com `make run` localmente.
+infra:
+	docker compose up --build -d postgres localstack keycloak
+	$(MAKE) provision
+
 down:
 	docker compose down
 
@@ -47,6 +53,11 @@ db-up:
 
 db-down:
 	docker compose stop postgres
+
+# --- Migrations ---
+# Aplicam automaticamente no start; útil para reverter o schema em dev.
+migrate:
+	go run ./cmd/migrate
 
 # --- SQS: provisionamento idempotente das filas no LocalStack ---
 provision:

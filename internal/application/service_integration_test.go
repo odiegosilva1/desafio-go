@@ -17,7 +17,9 @@ import (
 	"desafio-go/internal/storage/postgres"
 )
 
-func integrationService(t *testing.T) (*Service, *pgxpool.Pool) {
+// integrationPool cria um pool de conexões independente (simula um processo
+// separado: conexões e memória próprias).
+func integrationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx := context.Background()
 	url := os.Getenv("DATABASE_URL")
@@ -29,7 +31,13 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool) {
 		t.Fatalf("pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	return pool
+}
 
+// resetSchema zera o banco aplicando Down até a versão 0 e Up novamente.
+func resetSchema(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
 	mig := postgres.NewMigrator(pool, os.DirFS("../app/migrations"))
 	for {
 		v, err := mig.Down(ctx)
@@ -43,7 +51,11 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool) {
 	if err := mig.Up(ctx); err != nil {
 		t.Fatalf("up: %v", err)
 	}
+}
 
+// newServiceOnPool monta um Service sobre o pool informado, sem resetar o banco.
+func newServiceOnPool(t *testing.T, pool *pgxpool.Pool) *Service {
+	t.Helper()
 	repos := Repos{
 		Wallets:  postgres.NewWalletStore(),
 		Ledger:   postgres.NewLedgerStore(),
@@ -53,8 +65,15 @@ func integrationService(t *testing.T) (*Service, *pgxpool.Pool) {
 		UOW:      postgres.NewUnitOfWork(pool),
 	}
 	logger := observability.NewLogger("error")
-	svc := NewService(repos, logger, observability.NewMetrics())
-	return svc, pool
+	return NewService(repos, logger, observability.NewMetrics())
+}
+
+// integrationService prepara um Service sobre um banco zerado.
+func integrationService(t *testing.T) (*Service, *pgxpool.Pool) {
+	t.Helper()
+	pool := integrationPool(t)
+	resetSchema(t, pool)
+	return newServiceOnPool(t, pool), pool
 }
 
 func input(in ProcessInput) ProcessInput {
