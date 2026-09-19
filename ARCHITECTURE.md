@@ -75,6 +75,18 @@ que torna o replay idempotente nas duas portas.
   retenta com relock por carteira um número limitado de vezes; o consumidor
   SQS ainda reentrega a mensagem após falha transitória.
 
+## Escala horizontal (múltiplas instâncias)
+
+- Instâncias são independentes: cada uma mantém o próprio pool de conexões,
+  publisher de outbox, reference worker e memória; coordenam-se **apenas** pelo
+  banco (`FOR UPDATE SKIP LOCKED`). Não há lock distribuído nem dependência de
+  instância única.
+- Validado por `test/multiinstance` (specs linhas 200/415): três processos
+  reais (os/exec) disputando o mesmo Postgres — carteiras paralelas, mesma
+  carteira sob concorrência forte, publicação da outbox exatamente uma vez por
+  eventId no agregado e retomada de trabalho abandonado após morte brutal de
+  uma instância.
+
 ## Idempotência e integração
 
 - **Idempotência persistente por provedor**: `UNIQUE (provider_id,

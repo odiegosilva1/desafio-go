@@ -65,5 +65,17 @@ Os testes com build tag `integration` exigem o Postgres local (default
 
 ```sh
 make db-up
-go test -tags integration -count=1 -p 1 ./internal/app/... ./internal/application/ ./internal/storage/...
+go test -tags integration -count=1 -p 1 ./internal/app/... ./internal/application/ ./internal/storage/... ./test/...
 ```
+
+### Cenário multi-instância (`test/multiinstance`)
+
+`TestMultiInstanceIndependenceAndRecovery` demonstra as garantias de escala
+horizontal do specs (linhas 200/415): três **processos independentes**
+(os/exec do próprio binário de teste, cada um com pool de conexões, outbox
+publisher, reference worker e memória próprios) disputando o mesmo banco
+apenas por `FOR UPDATE SKIP LOCKED`. Valida carteiras paralelas, serialização
+da mesma carteira sob concorrência forte, rejeição por saldo, publicação da
+outbox exatamente uma vez por eventId no agregado das instâncias, e retomada
+de trabalho abandonado (`PENDING_REFERENCE` + outbox) após a morte brutal de
+uma instância.
