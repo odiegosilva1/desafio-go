@@ -64,7 +64,7 @@ migrate:
 
 # --- SQS: provisionamento idempotente das filas no LocalStack ---
 provision:
-	bash deploy/localstack/provision-sqs.sh
+	AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_ENDPOINT_URL=http://localhost:4566 bash deploy/localstack/provision-sqs.sh
 
 # --- Testes de integração (build tag `integration`; exigem Postgres up) ---
 # Serializados (-p 1): os pacotes resetam o mesmo banco local.
@@ -82,6 +82,15 @@ integration-teardown: db-down
 
 integration-check: integration-setup test-integration test-race-integration integration-teardown
 	@echo "Integração OK (pg real, race, composição Fx)"
+
+# --- Malha real automatizada: aplicação de produção contra infra real ---
+# LocalStack (SQS) e Keycloak (OIDC) de verdade, sem fakeSQS/fakeVerifier:
+# auth efetiva, HTTP, consumidor SQS com inbox, transactional outbox no destino
+# e reconciliação. Requer Postgres disponível (make db-up ou make up) e Docker.
+test-realstack:
+	docker compose up -d localstack keycloak
+	$(MAKE) provision
+	go test -tags integration -count=1 -p 1 ./test/realstack/
 
 # --- E2E: malha completa (HTTP + SQS + Keycloak + outbox) ---
 e2e: up run

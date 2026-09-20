@@ -53,8 +53,12 @@ func (s *Server) Listen() error {
 }
 
 // Serve aceita e atende requisições até o contexto terminar (encerra via
-// http.Server.Shutdown). Bloqueia na chamada que deve rodar em goroutine.
+// http.Server.Shutdown). Bloqueia na chamada que deve rodar em goroutine;
+// exige que Listen tenha vinculado o socket antes.
 func (s *Server) Serve(ctx context.Context) error {
+	if s.ln == nil {
+		return errors.New("httpapi: Serve antes de Listen")
+	}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

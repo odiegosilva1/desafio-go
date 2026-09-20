@@ -65,6 +65,7 @@ make migrate            # aplica migrations (up, default)
 make migrate ARGS=down  # reverte migrations (até a versão anterior)
 make test-integration   # integração (exige Postgres; usa -p 1)
 make integration-check  # db-up + integração + race + db-down
+make test-realstack     # malha REAL: LocalStack+Keycloak sem fakes (exige Docker)
 make e2e                # up + run (malha completa HTTP+SQS+Keycloak)
 make down               # derruba a infra
 ```
@@ -208,6 +209,23 @@ Os testes com build tag `integration` exigem o Postgres local (default
 make db-up
 go test -tags integration -count=1 -p 1 ./internal/app/... ./internal/application/ ./internal/storage/... ./test/...
 ```
+
+### Malha real, sem fakes (`test/realstack`)
+
+`TestRealStackEndToEnd` inicia a **aplicação de produção** (`app.New`) contra
+PostgreSQL, **LocalStack (SQS)** e **Keycloak (OIDC)** reais — nada de
+`fakeSQS`/`fakeVerifier`. Cobra a evidência dos eliminatorios §2/§10/§11:
+autenticação efetiva por token real, abertura de carteira, aposta via HTTP,
+aposta via **consumidor SQS real** (inbox deduplica reentregas), eventos da
+**transactional outbox publicados no destino** `wallet-events.fifo` e
+reconciliação consistente com o cliente interno autenticado.
+
+```sh
+make test-realstack     # sobe LocalStack+Keycloak, provisiona filas e testa
+```
+
+Requer Postgres disponível (`make db-up` ou `make up`). Sem o Docker de
+infraestrutura, o teste **escreve SKIP** (não falha a suíte comum).
 
 ### Cenário multi-instância (`test/multiinstance`)
 

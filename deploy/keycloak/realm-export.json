@@ -135,6 +135,7 @@
         }
       ],
       "defaultClientScopes": [
+        "wallet-audience",
         "wallet:internal",
         "wallet:admin"
       ],

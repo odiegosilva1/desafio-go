@@ -251,6 +251,11 @@ transitórias → 503).
   `go test -tags integration -count=1 -p 1 ./internal/... ./test/...`
 - Múltiplas instâncias (`test/multiinstance`) e simulações de falha
   (`test/faults`): ver README §Testes de integração. Rodam com o mesmo Postgres.
+- **Malha real** (`test/realstack`, `make test-realstack`): a aplicação de
+  produção é iniciada contra PostgreSQL + LocalStack (SQS) + Keycloak (OIDC)
+  **reais**, sem fakes — valida autenticação efetiva, consumidor SQS com inbox,
+  transactional outbox no destino e reconciliação (§2/§10/§11). Sem a infra,
+  o teste escreve SKIP.
 - E2E (`make up` + `make e2e`): LocalStack + Keycloak habilitam a malha
   completa HTTP+SQS+outbox.
 
