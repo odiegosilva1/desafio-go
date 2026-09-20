@@ -1,4 +1,4 @@
-# desafio-go
+# Wallet Service — transações de apostas com integridade financeira e processamento idempotente
 
 Serviço em Go (Uber Fx) para processamento distribuído de apostas com garantias
 financeiras: Money sem ponto flutuante, ledger append-only, idempotência
