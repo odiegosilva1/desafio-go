@@ -39,14 +39,22 @@ func NewServer(addr string, handler http.Handler, logger *slog.Logger) *Server {
 	}
 }
 
-// Start escuta no endereço configurado e serve requisições até Stop.
-func (s *Server) Start(ctx context.Context) error {
+// Listen vincula o socket e registra o endereço. Retorna antes de aceitar
+// conexões; feita no OnStart para que o serviço esteja escutando (health checks)
+// assim que o start Fx termina — sem janela de "connection refused".
+func (s *Server) Listen() error {
 	ln, err := net.Listen("tcp", s.server.Addr)
 	if err != nil {
 		return err
 	}
 	s.ln = ln
 	s.logger.Info("http server listening", "addr", s.server.Addr)
+	return nil
+}
+
+// Serve aceita e atende requisições até o contexto terminar (encerra via
+// http.Server.Shutdown). Bloqueia na chamada que deve rodar em goroutine.
+func (s *Server) Serve(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -55,10 +63,18 @@ func (s *Server) Start(ctx context.Context) error {
 			s.logger.Warn("http shutdown", "error", err.Error())
 		}
 	}()
-	if err := s.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := s.server.Serve(s.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// Start escuta no endereço configurado e serve requisições até Stop.
+func (s *Server) Start(ctx context.Context) error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	return s.Serve(ctx)
 }
 
 // Stop interrompe novas conexões e conclui o trabalho em andamento.

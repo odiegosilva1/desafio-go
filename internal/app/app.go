@@ -228,10 +228,14 @@ func registerLifecycle(
 				}()
 			}
 			go func() {
-				if err := server.Start(workerCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				if err := server.Serve(workerCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 					logger.Warn("http server stopped with error", "error", err.Error())
 				}
 			}()
+			if err := server.Listen(); err != nil {
+				logger.Warn("http server listen failed", "error", err.Error())
+				return err
+			}
 			return nil
 		},
 		OnStop: func(stopCtx context.Context) error {
