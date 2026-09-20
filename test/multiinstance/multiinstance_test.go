@@ -307,16 +307,17 @@ func enqueueExit(t *testing.T, pool *pgxpool.Pool) {
 	enqueue(t, pool, "exit", miPayload{})
 }
 
-// waitJobsDone espera zero jobs pendentes e nenhuma reivindicação ativa ou
-// órfã dentro da janela de staleness.
+// waitJobsDone espera que NENHUM job permaneça sem conclusão, independente da
+// idade da reivindicação: um job com claim de uma instância VIVA porém lenta
+// (ex.: sob -race) ainda está em execução e não pode escapar da espera pela
+// janela de staleness. Órfãos de instâncias mortas são retomados pelas
+// instâncias vivas (claim respeita staleAfter) e também concluem.
 func waitJobsDone(ctx context.Context, t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	waitFor(ctx, t, 60*time.Second, "conclusão dos jobs", func() bool {
 		var open int
 		if err := pool.QueryRow(ctx, `
-SELECT count(*) FROM mi_jobs
- WHERE NOT done
-   AND (claimed_by IS NULL OR claimed_at >= now() - interval '8 seconds')`).Scan(&open); err != nil {
+SELECT count(*) FROM mi_jobs WHERE NOT done`).Scan(&open); err != nil {
 			return false
 		}
 		return open == 0
