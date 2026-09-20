@@ -74,49 +74,37 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 15
-      # Gerenciado no passo de provisionamento via Admin API (start-dev padrão);
-      # em container fresco o bootstrap admin/admin cria o admin inicial.
-      keycloak:
-        image: quay.io/keycloak/keycloak:24.0.4
-        env:
-          KC_BOOTSTRAP_ADMIN_USERNAME: admin
-          KC_BOOTSTRAP_ADMIN_PASSWORD: admin
-          KC_HOSTNAME: localhost
-        ports:
-          - 8081:8080
+      # O Keycloak NÃO é um service container: a imagem não define CMD padrão
+      # (kc.sh sem argumento imprime o help e sai, Cmd=null) e `command` não é
+      # chave válida em services. Por isso é iniciado num passo, com a MESMA
+      # flag do docker-compose (start-dev --import-realm) e o realm montado.
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Provisionar realm (Admin API)
+      - name: Subir Keycloak (mesmo comando do docker-compose)
         run: |
-          set -e
-          MC=http://localhost:8081
-          for i in $(seq 1 60); do
-            curl -sf -o /dev/null "$MC/realms/master" && break
-            sleep 5
-          done
-          TOK=$(curl -sf -X POST "$MC/realms/master/protocol/openid-connect/token" \
-            -d 'client_id=admin-cli' -d 'username=admin' -d 'password=admin' \
-            -d 'grant_type=password' | python3 -c \
-            'import sys,json;print(json.load(sys.stdin)["access_token"])')
-          code=$(curl -s -o /dev/null -w '%{http_code}' \
-            -X POST "$MC/admin/realms" \
-            -H "Authorization: Bearer $TOK" \
-            -H 'Content-Type: application/json' \
-            --data-binary @deploy/keycloak/realm-export.json)
-          [ "$code" = "201" ] || { echo "criação do realm falhou: HTTP $code" >&2; exit 1; }
-          for i in $(seq 1 30); do
+          docker run -d --name keycloak \
+            -p 8081:8080 \
+            -e KC_BOOTSTRAP_ADMIN_USERNAME=admin \
+            -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
+            -e KC_HOSTNAME=localhost \
+            -v "$PWD/deploy/keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro" \
+            quay.io/keycloak/keycloak:24.0.4 start-dev --import-realm
+      - name: Aguardar realm do Keycloak (importação)
+        run: |
+          for i in $(seq 1 90); do
             code=$(curl -s -o /dev/null -w '%{http_code}' \
-              -X POST "$MC/realms/wallet/protocol/openid-connect/token" \
+              -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
               -d 'grant_type=client_credentials' \
               -d 'client_id=provider-a' \
               -d 'client_secret=provider-a-secret' || true)
-            [ "$code" = "200" ] && { echo "realm pronto ($i)"; exit 0; }
+            [ "$code" = "200" ] && { echo "realm OK ($i)"; exit 0; }
             sleep 5
           done
-          echo "realm não ficou utilizável" >&2
+          docker logs keycloak 2>&1 | tail -40
+          echo "realm do Keycloak não ficou pronto" >&2
           exit 1
       - name: Malha real (sem fakes)
         run: go test -count=1 -p 1 -tags integration ./test/realstack/
