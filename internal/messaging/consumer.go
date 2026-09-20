@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,6 +22,14 @@ import (
 
 // consumerName identifica a inbox do consumidor de operações SQS.
 const consumerName = "sqs-wager-transactions"
+
+// Backoff exponencial do consumidor em falhas transitórias (§10): cada reentrega
+// estende a visibilidade da mensagem (ChangeMessageVisibility) para
+// base * 2^(n-1), limitada ao teto. Valores em segundos.
+const (
+	consumerBackoffVisibilityBase = 5
+	consumerBackoffVisibilityMax  = 600
+)
 
 // Consumer consome a fila wager-transactions.fifo com a garantia de que o
 // registro da inbox e o tratamento durável compartilham a mesma transação. A
@@ -74,11 +83,12 @@ func (c *Consumer) Run(ctx context.Context) error {
 
 	for {
 		out, err := c.client.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
-			QueueUrl:              aws.String(c.queueURL),
-			MaxNumberOfMessages:   10,
-			WaitTimeSeconds:       15,
-			VisibilityTimeout:     VisibilityTimeout,
-			MessageAttributeNames: []string{"All"},
+			QueueUrl:                    aws.String(c.queueURL),
+			MaxNumberOfMessages:         10,
+			WaitTimeSeconds:             15,
+			VisibilityTimeout:           VisibilityTimeout,
+			MessageAttributeNames:       []string{"All"},
+			MessageSystemAttributeNames: []types.MessageSystemAttributeName{types.MessageSystemAttributeNameApproximateReceiveCount},
 		})
 		if err != nil {
 			if ctx.Err() != nil {
@@ -107,25 +117,35 @@ func (c *Consumer) Run(ctx context.Context) error {
 // durablemente (commit) e a remoção da fila é segura.
 func (c *Consumer) handleMessage(ctx context.Context, msg types.Message) {
 	body := aws.ToString(msg.Body)
-	messageID := aws.ToString(msg.MessageId)
-	tctx := observability.WithTrace(ctx, observability.Trace{MessageID: messageID})
+	sqsMessageID := aws.ToString(msg.MessageId)
 	hash := sha256Sum(body)
 
 	envelope, err := ParseEnvelope(body)
 	if err != nil {
 		// Mensagem inválida: falha permanente, não corrigível por retry → DLQ.
-		observability.Warn(tctx, c.logger, "invalid sqs message", "error", err.Error())
+		observability.Warn(observability.WithTrace(ctx, observability.Trace{MessageID: sqsMessageID}),
+			c.logger, "invalid sqs message", "error", err.Error())
 		c.metrics.Inc(observability.MetricSQSDLQ, "reason", "invalid_message")
-		c.sendToDLQ(tctx, body, "INVALID_MESSAGE")
-		c.delete(tctx, msg)
+		c.sendToDLQ(ctx, body, "INVALID_MESSAGE")
+		c.delete(ctx, msg, sqsMessageID)
 		return
 	}
+
+	// Identidade durável da mensagem para a inbox: o messageId do envelope
+	// (§10). Em FIFO o messageId nativo coincide na prática, mas o envelope é a
+	// identidade de negócio estável, preservada em reentregas.
+	messageID := envelope.MessageID
+	if messageID == "" {
+		messageID = sqsMessageID
+	}
+	tctx := observability.WithTrace(ctx, observability.Trace{MessageID: messageID})
 
 	trx := observability.TraceFrom(tctx)
 	trx.ProviderID = envelope.Data.ProviderID
 	trx.TransactionID = envelope.Data.ExternalTransactionID
 	tctx = observability.WithTrace(tctx, trx)
 
+	start := time.Now()
 	err = c.repos.UOW.Run(tctx, func(ctx context.Context, tx port.TxScope) error {
 		first, err := c.repos.Inbox.InsertNew(ctx, tx, c.consumerName, messageID, hash)
 		if err != nil {
@@ -158,30 +178,68 @@ func (c *Consumer) handleMessage(ctx context.Context, msg types.Message) {
 				c.sendToDLQ(ctx, body, derr.CodeOf(perr))
 				return nil
 			case derr.IsClass(perr, derr.ClassTransient):
+				c.metrics.Inc(observability.MetricWagerResults, "status", derr.CodeOf(perr), "channel", "sqs")
 				return perr
 			default:
 				// Conflito de idempotência ou rejeição definitiva já encerrada:
 				// mensagem consumida sem novo efeito financeiro.
+				c.metrics.Inc(observability.MetricWagerResults, "status", derr.CodeOf(perr), "channel", "sqs")
 				_ = c.repos.Inbox.Complete(ctx, tx, c.consumerName, messageID, "PROCESSED", derr.CodeOf(perr))
 				return nil
 			}
 		}
 		_ = c.repos.Inbox.Complete(ctx, tx, c.consumerName, messageID, "PROCESSED", result.FailureCode)
+		c.metrics.Inc(observability.MetricWagerResults, "status", string(result.Status), "channel", "sqs")
+		c.metrics.Observe(observability.MetricProcessingLatency, time.Since(start), "channel", "sqs")
 		return nil
 	})
 
 	if err != nil {
-		// Transitória: mensagem permanece na fila; o visibility timeout libera a
-		// reentrega e o retry com backoff acontece no próximo recebimento.
+		// Transitória: a mensagem permanece na fila e o consumidor estende a
+		// visibilidade com backoff exponencial (ChangeMessageVisibility),
+		// baseado no número de entregas registrado pelo broker.
 		observability.Warn(tctx, c.logger, "transient sqs processing failure",
 			"error", err.Error())
 		c.metrics.Inc(observability.MetricSQSProcessed, "status", "transient_retry")
+		c.backoffTransient(ctx, msg, tctx)
 		return
 	}
 
-	c.delete(tctx, msg)
-	c.metrics.Inc(observability.MetricSQSProcessed, "status", "processed")
+	c.delete(ctx, msg, sqsMessageID)
+	c.metrics.Inc(observability.MetricSQSProcessed, "status", "processed", "messageId", messageID)
 	observability.Info(tctx, c.logger, "sqs message processed and removed")
+}
+
+// backoffTransient estende a visibilidade da mensagem com backoff exponencial
+// baseado no ApproximateReceiveCount do broker, evitando redelivery imediato e
+// o efeito thundering-herd entre instâncias. Em última falha, a mensagem
+// garante reentrega pelo visibility timeout padrão.
+func (c *Consumer) backoffTransient(ctx context.Context, msg types.Message, tctx context.Context) {
+	receiveCount := 1
+	if v := msg.Attributes["ApproximateReceiveCount"]; v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			receiveCount = n
+		}
+	}
+	visibility := backoffVisibility(receiveCount)
+	if _, err := c.client.ChangeMessageVisibility(ctx, &sqs.ChangeMessageVisibilityInput{
+		QueueUrl:          aws.String(c.queueURL),
+		ReceiptHandle:     msg.ReceiptHandle,
+		VisibilityTimeout: int32(visibility),
+	}); err != nil {
+		observability.Warn(tctx, c.logger, "failed to extend visibility for backoff",
+			"messageId", aws.ToString(msg.MessageId), "error", err.Error())
+	}
+}
+
+// backoffVisibility calcula a visibilidade crescente (em segundos) para o retry
+// transitório: base * 2^(n-1), limitada ao teto.
+func backoffVisibility(receiveCount int) int {
+	delay := consumerBackoffVisibilityBase << (receiveCount - 1)
+	if delay > consumerBackoffVisibilityMax {
+		delay = consumerBackoffVisibilityMax
+	}
+	return delay
 }
 
 // applyInboxDeduplication decide a ação para mensagens já registradas
@@ -218,13 +276,13 @@ func (c *Consumer) sendToDLQ(ctx context.Context, body, reason string) {
 	}
 }
 
-func (c *Consumer) delete(ctx context.Context, msg types.Message) {
+func (c *Consumer) delete(ctx context.Context, msg types.Message, messageID string) {
 	if _, err := c.client.DeleteMessage(ctx, &sqs.DeleteMessageInput{
 		QueueUrl:      aws.String(c.queueURL),
 		ReceiptHandle: msg.ReceiptHandle,
 	}); err != nil {
 		observability.Warn(ctx, c.logger, "failed to delete message",
-			"messageId", aws.ToString(msg.MessageId), "error", err.Error())
+			"messageId", messageID, "error", err.Error())
 	}
 }
 

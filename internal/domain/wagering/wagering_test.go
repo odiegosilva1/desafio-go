@@ -70,6 +70,46 @@ func TestNewPendingLossRequiresZeroAmount(t *testing.T) {
 	}
 }
 
+func TestZeroPolicyWinRollbackRefund(t *testing.T) {
+	base := NewPendingOptions{
+		ID: "tx-1", ExternalTxID: "e-1", ProviderID: "p", PlayerID: "pl",
+		WalletID: "w", RoundID: "r", GameID: "g",
+	}
+	for _, tc := range []struct {
+		name string
+		kind Kind
+	}{
+		{"WIN", KindWin},
+		{"ROLLBACK", KindRollback},
+		{"REFUND", KindRefund},
+	} {
+		t.Run(tc.name+"=zero", func(t *testing.T) {
+			opts := base
+			opts.ID = "tx-zero-" + tc.name
+			opts.Kind = tc.kind
+			opts.Money = mustMoney(t, "0.00")
+			opts.ReferenceExtID = "ref-1"
+			if _, err := NewPending(opts); !errors.Is(err, ErrInvalidAmount) {
+				t.Errorf("zero err = %v, want ErrInvalidAmount", err)
+			}
+		})
+		t.Run(tc.name+"=negative", func(t *testing.T) {
+			neg, err := money.FromUnits(money.CurrencyBRL, -500)
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := base
+			opts.ID = "tx-neg-" + tc.name
+			opts.Kind = tc.kind
+			opts.Money = neg
+			opts.ReferenceExtID = "ref-1"
+			if _, err := NewPending(opts); !errors.Is(err, ErrInvalidAmount) {
+				t.Errorf("negativo err = %v, want ErrInvalidAmount", err)
+			}
+		})
+	}
+}
+
 func TestNewPendingRefundRequiresReference(t *testing.T) {
 	if _, err := NewPending(NewPendingOptions{
 		ID: "tx-1", ExternalTxID: "e-1", ProviderID: "p", PlayerID: "pl",

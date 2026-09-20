@@ -190,6 +190,13 @@ func (s *Service) attempt(ctx context.Context, tx port.TxScope, t wagering.Trans
 		return outcome{}, derr.Wrap(derr.ClassTransient, derr.CodeTransient, err)
 	}
 
+	// A moeda de cada operação externa deve coincidir com a da carteira (§6.2),
+	// inclusive para LOSS, que exige explicitamente a moeda da carteira.
+	if t.Money().Currency() != w.Currency() {
+		return s.reject(ctx, tx, t, derr.CodeCurrencyMismatch,
+			"moeda da operação difere da moeda da carteira", now)
+	}
+
 	switch t.Kind() {
 	case wagering.KindBet:
 		return s.move(ctx, tx, t, w, false, now)
@@ -278,14 +285,20 @@ func (s *Service) reversal(ctx context.Context, tx port.TxScope, t wagering.Tran
 		return s.reject(ctx, tx, t, derr.CodeOf(err), err.Error(), now)
 	}
 
-	reversals, err := s.repos.Wagering.ListReversalsByReference(ctx, tx, t.ReferenceExtID())
+	reversals, err := s.repos.Wagering.ListReversalsByReference(ctx, tx, t.ProviderID(), t.ReferenceExtID())
 	if err != nil {
 		return outcome{}, derr.Wrap(derr.ClassTransient, derr.CodeTransient, err)
 	}
+	effect := reversalEffect(t, ref)
 	for _, r := range reversals {
-		if r.ID() != t.ID() && r.Kind() == t.Kind() && r.State() == wagering.StateProcessed {
+		// Uma referência não recebe duas reversões bem-sucedidas com o mesmo
+		// efeito financeiro (§7): REFUND e ROLLBACK de uma BET ambas devolvem o
+		// débito (custo sobre a carteira), e dois ROLLBACK de uma WIN/REFUND
+		// debitam a reboque. Isso impede a devolução duplicada do mesmo débito
+		// e a reversão em cascata do mesmo crédito.
+		if r.ID() != t.ID() && r.State() == wagering.StateProcessed && reversalEffect(r, ref) == effect {
 			return s.reject(ctx, tx, t, derr.CodeDuplicateReversal,
-				"referência já sofreu reversão do mesmo tipo", now)
+				"referência já sofreu uma reversão com o mesmo efeito financeiro", now)
 		}
 	}
 
@@ -325,6 +338,20 @@ func reversalIsDebit(t, ref wagering.Transaction) bool {
 	}
 }
 
+// reversalEffect agrupa as reversões pelo efeito financeiro que produzem sobre
+// a referência (§7): "CREDIT" devolve um débito (REFUND ou ROLLBACK de uma BET)
+// e "DEBIT" desfaz um crédito (ROLLBACK de uma WIN/REFUND). Duas reversões do
+// mesmo efeito sobre a mesma referência nunca podem coexistir.
+func reversalEffect(t, ref wagering.Transaction) string {
+	if t.Kind() == wagering.KindRefund {
+		return "CREDIT"
+	}
+	if ref.Kind() == wagering.KindBet {
+		return "CREDIT"
+	}
+	return "DEBIT"
+}
+
 // validateReversal exige concordância entre a operação e sua referência:
 // provedor, jogador, carteira, moeda e rodada idênticos, valor igual ao da
 // referência, e tipo de referência compatível.
@@ -341,11 +368,26 @@ func validateReversal(t, ref wagering.Transaction) error {
 	if t.Money().Currency() != ref.Money().Currency() {
 		return derr.ErrReversalMismatch
 	}
-	if (t.RoundID() != "" && ref.RoundID() != "") && t.RoundID() != ref.RoundID() {
+	if t.RoundID() != ref.RoundID() {
 		return derr.ErrReversalMismatch
 	}
 	if t.Money().Units() != ref.Money().Units() {
 		return derr.ErrReversalMismatch
+	}
+	// Compatibilidade de tipo (§7): REFUND só devolve uma BET; ROLLBACK desfaz
+	// uma BET, uma WIN ou um REFUND. Uma reversão sobre tipo incompatível é
+	// rejeição definitiva e nunca movimenta a carteira.
+	switch t.Kind() {
+	case wagering.KindRefund:
+		if ref.Kind() != wagering.KindBet {
+			return derr.ErrReversalMismatch
+		}
+	case wagering.KindRollback:
+		switch ref.Kind() {
+		case wagering.KindBet, wagering.KindWin, wagering.KindRefund:
+		default:
+			return derr.ErrReversalMismatch
+		}
 	}
 	return nil
 }

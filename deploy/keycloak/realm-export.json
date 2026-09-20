@@ -8,7 +8,7 @@
   "resetPasswordAllowed": false,
   "editUsernameAllowed": false,
   "accessTokenLifespan": 1800,
-  "rememeberMe": false,
+  "rememberMe": false,
   "roles": {
     "client": {}
   },

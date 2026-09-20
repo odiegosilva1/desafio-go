@@ -74,7 +74,10 @@ func (p *OutboxPublisher) Run(ctx context.Context) error {
 
 // scan disputa um lote de registros pendentes e publica cada um. A publicação
 // ocorre antes da confirmação (MarkPublished) no mesmo commit: uma falha entre
-// a publicação e o commit gera republicação segura, preservando o eventId.
+// a publicação e o commit gera republicação segura, preservando o eventId. Em
+// falha de publicação o atraso é reagendado com backoff exponencial durável
+// (RecordFailure), e o lote continua — uma única mensagem problemática não blo-
+// queia a publicação dos demais registros.
 func (p *OutboxPublisher) scan(ctx context.Context) error {
 	err := p.service.repos.UOW.Run(ctx, func(ctx context.Context, tx port.TxScope) error {
 		now := time.Now().UTC()
@@ -87,7 +90,11 @@ func (p *OutboxPublisher) scan(ctx context.Context) error {
 				observability.Warn(ctx, p.service.logger, "outbox publish failed",
 					"eventId", r.EventID, "error", err.Error())
 				p.service.metrics.Inc(observability.MetricOutboxRetries, "eventId", r.EventID)
-				return err
+				if rerr := p.service.repos.Outbox.RecordFailure(ctx, tx, r.EventID,
+					r.Attempts+1, outboxNextAttempt(r.Attempts, now)); rerr != nil {
+					return rerr
+				}
+				continue
 			}
 			if err := p.service.repos.Outbox.MarkPublished(ctx, tx, r.EventID, p.instanceID, now); err != nil {
 				return err
@@ -101,4 +108,25 @@ func (p *OutboxPublisher) scan(ctx context.Context) error {
 		return nil
 	})
 	return err
+}
+
+// Backoff exponencial durável da outbox: base * 2^tentativas, limitado ao teto.
+// Persistido em next_attempt_at, sobrevive a reinicialização e é compartilhado
+// entre publishers (a próxima disputa re-utiliza o vencimento).
+const (
+	outboxBackoffBase = time.Second
+	outboxBackoffMax  = 5 * time.Minute
+)
+
+// outboxNextAttempt calcula o próximo instante de publicação após a enésima
+// tentativa falha (as falhas já registradas são attempts).
+func outboxNextAttempt(attempts int, now time.Time) time.Time {
+	if attempts < 0 {
+		attempts = 0
+	}
+	delay := outboxBackoffBase << attempts
+	if delay > outboxBackoffMax {
+		delay = outboxBackoffMax
+	}
+	return now.Add(delay)
 }

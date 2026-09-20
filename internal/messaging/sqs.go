@@ -25,6 +25,10 @@ type SQSClient interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 	SendMessage(ctx context.Context, params *sqs.SendMessageInput, optFns ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+	// ChangeMessageVisibility estende a visibilidade de uma mensagem em falha
+	// transitória (retry com backoff exponencial do consumidor). O `receiptHandle`
+	// continua válido para DeleteMessage.
+	ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error)
 }
 
 // NewSQSClient constrói o cliente SQS apontando para o endpoint configurado

@@ -117,16 +117,67 @@ que torna o replay idempotente nas duas portas.
   uso e as mesmas chaves únicas; a primeira que comitar define o efeito, a
   segunda é deduplicada (idempotência persistente).
 
+### Consumidor SQS — tentativas, visibility e mensagens inválidas
+
+- **Visibility timeout**: `30s` (`messaging.VisibilityTimeout`), aplicado no
+  `ReceiveMessage`. Uma falha transitória durante o tratamento deixa a mensagem
+  na fila; ao expirar o prazo, o broker a disponibiliza novamente e o próximo
+  recebimento é a forma de retry. Em `SIGTERM` o loop de polling para e o
+  tratamento em andamento é concluído dentro do prazo; sem isso, a visibilidade
+  expira e a reentrega é segura.
+- **Backoff exponencial nas falhas transitórias**: em vez de deixar a redelivery
+  imediata ao fim do `VisibilityTimeout`, o consumidor **estende a visibilidade**
+  (`ChangeMessageVisibility`) para `5s * 2^(n-1)` (teto `600s`), lendo o
+  `ApproximateReceiveCount` do broker. Isso evita `thundering-herd` entre as
+  instâncias e dá ao destino tempo para se recuperar. Se a extensão falhar, a
+  reentrega ocorre pelo prazo padrão.
+- **Identidade de inbox = `messageId` do envelope**: a duplicação é ancorada no
+  identificador de negócio estável da mensagem (§10), não no `MessageId` nativo
+  do SQS (que pode variar em reentregas). O registro da inbox e o tratamento
+  compartilham o mesmo commit; a remoção da fila acontece **somente depois**. Um
+  processo que morre entre o commit e o delete reentrega a mesma mensagem,
+  deduplicada pela inbox (nunca um segundo efeito financeiro). O `INSERT` da
+  inbox usa `ON CONFLICT DO NOTHING` para não abortar a transação (25P02) na
+  reentrega.
+- **Limite de tentativas**: o redrive da entrada aponta para a DLQ com
+  `maxReceiveCount = 5` (`deploy/localstack/provision-sqs.sh`); exauridas as
+  tentativas, o **próprio SQS** move a mensagem à DLQ. Falhas inequivocamente
+  permanentes são encaminhadas à DLQ **imediatamente** pelo consumidor, sem
+  esgotar as tentativas.
+- **Mensagens inválidas**: corpo não parseável → `INVALID_MESSAGE`; envelope
+  válido, porém fora das regras de domínio (entrada inválida) → codifica o
+  `failureCode` (ex.: `INVALID_MONEY`); reentrega com conteúdo diferente do hash
+  original → `PAYLOAD_MISMATCH`. Todas vão à DLQ e são removidas da fila, sem
+  efeito no banco.
+- **Rejeições de negócio** (`ClassBusinessRule`) são **terminais**: confirmadas
+  na inbox com o `FailureCode`, mensagem removida, **sem** DLQ (specs §10).
+- **Outbox com backoff durável**: falhas de publicação reagem no próprio registro
+  (`attempts++` e `next_attempt_at` com backoff exponencial persistido — `1s *
+  2^n`, teto `5min`), compartilhado entre instâncias; o lote continua para não
+  deixar uma mensagem problemática bloquear as demais, e `MarkPublished` com o
+  mesmo `eventId` garante idempotência na republicação.
+
 ## Reversões e PENDING_REFERENCE
 
-- **REFUND** sobre BET e **ROLLBACK** sobre BET/WIN/REFUND, com validação de
-  provedor/jogador/carteira/moeda/rodada/valor e rejeição de reversão
-  duplicada do mesmo tipo.
+- **REFUND** sobre BET e **ROLLBACK** sobre BET/WIN/REFUND (qualquer outra
+  combinação é `REVERSAL_MISMATCH`), com validação de
+  provedor/jogador/carteira/moeda/rodada/valor.
+- **Reversão duplicada por efeito financeiro (§7)**: uma referência nunca recebe
+  duas reversões **processadas** com o mesmo efeito — REFUND e ROLLBACK de uma
+  BET ambas devolvem o mesmo débito (`CREDIT`); dois ROLLBACK de uma WIN/REFUND
+  debitam o mesmo crédito (`DEBIT`). A segunda é `DUPLICATE_REVERSAL`. Isso
+  impede a devolução duplicada do mesmo débito (Refund+Rollback sobre a mesma
+  BET) e a reversão em cascata do mesmo crédito, sem depender de ordem ou
+  convenção de nomenclatura.
 - Operação que referencia uma transação ainda inexistente/em andamento não
   falha: entra em **PENDING_REFERENCE** com `next_attempt_at` em backoff
   exponencial e é retomada pelo `ReferenceWorker` (múltiplas instâncias
   disputam com `FOR UPDATE SKIP LOCKED`).
-- **TTL**: `MaxReferenceAttempts = 5`; esgotado → `REJECTED`.
+- **TTL**: `MaxReferenceAttempts = 5`; esgotado → `REJECTED`
+  (`REFERENCE_NOT_FOUND`), sem efeito financeiro.
+- **Moeda**: a moeda de cada operação (incluindo LOSS) deve coincidir com a da
+  carteira (`CURRENCY_MISMATCH`); o schema vigora BRL-only e já rejeita na
+  escrita — a checagem de domínio é a rede de segurança para multi-moeda.
 
 ## Autenticação e autorização
 
@@ -138,6 +189,27 @@ que torna o replay idempotente nas duas portas.
   abertura/reconciliação internas; `X-Wallet-Internal-Api-Key` protege a via
   interna (não pública).
 - Health checks públicos. Métricas Prometheus em `/metrics`.
+
+## Contrato HTTP — códigos de status e corpos
+
+Situações distintas são distinguíveis pelo status e por um `failureCode`
+estável respondido no corpo (`{"code":"...","message":"..."}`):
+
+| Status | Situação | `failureCode` (exemplos) |
+| --- | --- | --- |
+| `200 OK` | Operação concluída (`idempotentReplay` `false`/`true`), leituras de carteira/ledger/transação, reconciliação consistente | — |
+| `201 Created` | Carteira aberta (`POST /wallets`) | — |
+| `202 Accepted` | Operação aguardando referência (`PENDING_REFERENCE`) | `PENDING_REFERENCE` |
+| `400 Bad Request` | Entrada inválida: JSON corrupto/campos desconhecidos, `Money` inválido, `Idempotency-Key` ausente, cursor/limit inválidos, `OPENING` por HTTP/SQS | `INVALID_PAYLOAD`, `INVALID_MONEY`, `MISSING_IDEMPOTENCY_KEY`, `INVALID_CURSOR`, `OPENING_BLOCKED` |
+| `404 Not Found` | Carteira/transação inexistente ou **fora do provedor autenticado** (isolamento §2) | `NOT_FOUND`, `WALLET_NOT_FOUND` |
+| `409 Conflict` | Chave de idempotência reutilizada com payload diferente; abertura duplicada para o mesmo `(playerId, currency)` | `IDEMPOTENCY_CONFLICT`, `DUPLICATE_WALLET` |
+| `422 Unprocessable Entity` | Rejeição de negócio definitiva (terminal, sem efeito financeiro) | `INSUFFICIENT_FUNDS`, `REVERSAL_INSUFFICIENT_FUNDS`, `DUPLICATE_REVERSAL`, `REVERSAL_MISMATCH`, `ZERO_VALUE_*`, moeda incompatível |
+| `503 Service Unavailable` | Falha transitória/indisponibilidade de dependência (retry do cliente) | `TRANSIENT`, `CONCURRENT_UPDATE` |
+
+Respostas de erro usam o corpo `{"code": "<failureCode>", "message": "..."}` e são
+distinguíveis por classe de domínio (`ClassInvalidInput` → 400,
+`ClassBusinessRule` → 422, `ClassConflict` → 409, `ClassPendingReference` → 202,
+transitórias → 503).
 
 ## Migrações
 
@@ -167,12 +239,16 @@ que torna o replay idempotente nas duas portas.
 
 ## Testes
 
-- Unit: domínio, httpapi (handlers com stub), derr, wagering/wallet.
+- Unit: domínio, httpapi (handlers com stub), derr, wagering/wallet, app
+  (reversões — `validateReversal`/`reversalEffect`, zero-policy), messaging
+  (backoff exponencial do consumidor).
 - Integração (`//go:build integration`, exigem Postgres local): schema
   constraints, fluxo completo open/process/replay/reject/reconcile,
-  PENDING_REFERENCE resolvida pelo worker, e composição Fx start/stop.
+  PENDING_REFERENCE resolvida pelo worker, composição Fx start/stop, disputa
+  obrigatória 80.00×80.00 sobre 100.00, reentrega pós-crash, expiração de
+  referência, conflito de idempotência e eventos do OPENING.
   Rodados serializados (`-p 1`) porque resetam o mesmo banco:
-  `go test -tags integration -count=1 -p 1 ./internal/...`
+  `go test -tags integration -count=1 -p 1 ./internal/... ./test/...`
 - Múltiplas instâncias (`test/multiinstance`) e simulações de falha
   (`test/faults`): ver README §Testes de integração. Rodam com o mesmo Postgres.
 - E2E (`make up` + `make e2e`): LocalStack + Keycloak habilitam a malha

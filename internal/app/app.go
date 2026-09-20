@@ -64,6 +64,7 @@ func baseModule() fx.Option {
 			newReferenceWorker,
 			newAuthVerifier,
 			httpapi.NewHandlers,
+			newReadiness,
 			newHTTPHandler,
 			newHTTPServer,
 		),
@@ -160,14 +161,14 @@ func newHTTPHandler(
 	verifier auth.Verifier,
 	logger *slog.Logger,
 	metrics *observability.Metrics,
-	pool *pgxpool.Pool,
+	ready httpapi.Pinger,
 ) http.Handler {
 	return httpapi.Router{
 		Handlers: handlers,
 		Verifier: verifier,
 		Logger:   logger,
 		Metrics:  metrics,
-		Ping:     pool,
+		Ping:     ready,
 		Version:  "dev",
 	}.Handler()
 }

@@ -85,11 +85,11 @@ func (s *wageringStore) GetByExternalTxID(ctx context.Context, sc port.TxScope, 
 		  WHERE provider_id = $1 AND external_tx_id = $2`, providerID, externalTxID))
 }
 
-func (s *wageringStore) ListReversalsByReference(ctx context.Context, sc port.TxScope, referenceExternalID string) ([]wagering.Transaction, error) {
+func (s *wageringStore) ListReversalsByReference(ctx context.Context, sc port.TxScope, providerID, referenceExternalID string) ([]wagering.Transaction, error) {
 	rows, err := fromScope(sc).Query(ctx, `
 SELECT `+wageringColumns+` FROM wagering_transactions
- WHERE reference_ext_id = $1 AND kind IN ('REFUND', 'ROLLBACK')
- ORDER BY recorded_at, id`, referenceExternalID)
+ WHERE provider_id = $1 AND reference_ext_id = $2 AND kind IN ('REFUND', 'ROLLBACK')
+ ORDER BY recorded_at, id`, providerID, referenceExternalID)
 	if err != nil {
 		return nil, err
 	}

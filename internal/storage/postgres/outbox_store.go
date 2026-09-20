@@ -35,7 +35,7 @@ ON CONFLICT (id) DO NOTHING`,
 func (s *outboxStore) Claim(ctx context.Context, sc port.TxScope, batchSize int, now time.Time) ([]port.OutboxRecord, error) {
 	rows, err := fromScope(sc).Query(ctx, `
 SELECT id, aggregate_type, aggregate_id, event_type, payload,
-       correlation_id, causation_id, occurred_at, version
+       correlation_id, causation_id, occurred_at, version, attempts
   FROM outbox
  WHERE status = 'PENDING' AND next_attempt_at <= $1
  ORDER BY next_attempt_at, id
@@ -53,9 +53,9 @@ SELECT id, aggregate_type, aggregate_id, event_type, payload,
 			payload                       []byte
 			corr, causa                   *string
 			occurred                      time.Time
-			version                       int
+			version, attempts             int
 		)
-		if err := rows.Scan(&id, &aggType, &aggID, &eventType, &payload, &corr, &causa, &occurred, &version); err != nil {
+		if err := rows.Scan(&id, &aggType, &aggID, &eventType, &payload, &corr, &causa, &occurred, &version, &attempts); err != nil {
 			return nil, err
 		}
 		out = append(out, port.OutboxRecord{
@@ -68,6 +68,7 @@ SELECT id, aggregate_type, aggregate_id, event_type, payload,
 			CausationID:   strOr(causa),
 			OccurredAt:    occurred,
 			Version:       version,
+			Attempts:      attempts,
 		})
 	}
 	return out, rows.Err()
@@ -80,5 +81,16 @@ func (s *outboxStore) MarkPublished(ctx context.Context, sc port.TxScope, eventI
 UPDATE outbox
    SET status = 'PUBLISHED', published_at = $2, published_by = $3
   WHERE id = $1 AND status = 'PENDING'`, eventID, now, publishedBy)
+	return err
+}
+
+// RecordFailure persiste a falha de publicação (retry com backoff): incrementa a
+// disputa e reagenda o próximo envio, mantendo o registro PENDING. Publicado por
+// um publisher, o próximo candidato só tenta após next_attempt_at.
+func (s *outboxStore) RecordFailure(ctx context.Context, sc port.TxScope, eventID string, attempts int, nextAttemptAt time.Time) error {
+	_, err := fromScope(sc).Exec(ctx, `
+UPDATE outbox
+   SET attempts = $2, next_attempt_at = $3
+  WHERE id = $1 AND status = 'PENDING'`, eventID, attempts, nextAttemptAt)
 	return err
 }

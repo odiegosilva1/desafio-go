@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
@@ -24,6 +26,29 @@ type fakeVerifier struct{}
 
 func (fakeVerifier) Verify(ctx context.Context, rawToken string) (auth.Principal, error) {
 	return auth.Principal{}, auth.ErrInvalidToken
+}
+
+// stubSQS responde às operações SQS sem LocalStack; o readiness do SQS
+// (GetQueueUrl) responde Ok para manter /health/ready em 200.
+type stubSQS struct{}
+
+func (stubSQS) GetQueueUrl(ctx context.Context, _ *sqs.GetQueueUrlInput, _ ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {
+	return &sqs.GetQueueUrlOutput{QueueUrl: aws.String("http://sqs/queue")}, nil
+}
+func (stubSQS) CreateQueue(ctx context.Context, _ *sqs.CreateQueueInput, _ ...func(*sqs.Options)) (*sqs.CreateQueueOutput, error) {
+	return &sqs.CreateQueueOutput{QueueUrl: aws.String("http://sqs/queue")}, nil
+}
+func (stubSQS) ReceiveMessage(ctx context.Context, _ *sqs.ReceiveMessageInput, _ ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error) {
+	return &sqs.ReceiveMessageOutput{}, nil
+}
+func (stubSQS) DeleteMessage(ctx context.Context, _ *sqs.DeleteMessageInput, _ ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error) {
+	return &sqs.DeleteMessageOutput{}, nil
+}
+func (stubSQS) SendMessage(ctx context.Context, _ *sqs.SendMessageInput, _ ...func(*sqs.Options)) (*sqs.SendMessageOutput, error) {
+	return &sqs.SendMessageOutput{}, nil
+}
+func (stubSQS) ChangeMessageVisibility(ctx context.Context, _ *sqs.ChangeMessageVisibilityInput, _ ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 
 func freePort(t *testing.T) string {
@@ -67,6 +92,7 @@ func TestCompositionStartStopIntegration(t *testing.T) {
 		// Overrides apenas das dependências que exigiriam LocalStack/Keycloak.
 		// fx.Replace decorates o tipo: o construtor original não é invocado.
 		fx.Replace(fx.Annotate(fakeVerifier{}, fx.As(new(auth.Verifier)))),
+		fx.Replace(fx.Annotate(stubSQS{}, fx.As(new(messaging.SQSClient)))),
 		func() fx.Option {
 			unreachable := "http://127.0.0.1:1/queue/unreachable"
 			return fx.Replace(messaging.Queues{

@@ -8,6 +8,21 @@ autenticação OAuth 2.0/OIDC via Keycloak.
 > Documento em construção. Veja o enunciado completo em [`specs.md`](specs.md) e
 > as decisões em [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## Pré-requisitos
+
+A partir de um checkout limpo você precisa de:
+
+| Ferramenta | Versão mínima | Observação |
+| --- | --- | --- |
+| Go | `1.25.0` | exigida pelo `go.mod` |
+| Docker + Docker Compose | Compose v2 | sobe `postgres`, `localstack` e `keycloak` |
+| `make` | — | atalhos documentados em §Comandos |
+| `jq` | — | apenas nos exemplos de chamadas (§Fluxos autenticados) |
+
+Nenhum segredo é necessário: todos os valores locais estão em
+[`.env.example`](.env.example) e os serviços provisionam as próprias
+dependências (`make up` cria o realm Keycloak e as filas SQS).
+
 ## Estrutura
 
 ```
@@ -53,6 +68,19 @@ make integration-check  # db-up + integração + race + db-down
 make e2e                # up + run (malha completa HTTP+SQS+Keycloak)
 make down               # derruba a infra
 ```
+
+Comandos exigidos pela §15 do specs, ou equivalentes via `make`:
+
+```sh
+docker compose up --build        # sobe toda a stack e provisiona (ou: make up)
+go test ./...                    # unit (ou: make test)
+go test -race ./...              # unit com detector de corrida (ou: make test-race)
+go vet ./...                     # análise estática (ou: make vet)
+```
+
+> `make up` equivale a `docker compose up --build` + provisionamento do realm
+> Keycloak e das filas SQS; `make check` cobre `vet`, `build`, `test` e
+> `test-race`.
 
 ## Fluxos autenticados (Keycloak) e exemplos de chamadas
 
@@ -132,6 +160,44 @@ Variáveis de ambiente documentadas em [`.env.example`](.env.example)
 (`HTTP_ADDR`, `DATABASE_URL`, `OIDC_*`, `AWS_*`, `WORKER_*`, `SHUTDOWN_TIMEOUT`,
 `LOG_LEVEL`). Nenhum segredo é embutido no código.
 
+## Contrato HTTP (códigos de status)
+
+| Status | Situação |
+| --- | --- |
+| `200` | operação concluída / leituras / reconciliação consistente |
+| `201` | carteira criada |
+| `202` | operação aguardando referência (`PENDING_REFERENCE`) |
+| `400` | entrada inválida (`INVALID_PAYLOAD`, `INVALID_MONEY`, `MISSING_IDEMPOTENCY_KEY`, `OPENING_BLOCKED`, cursor/limit) |
+| `404` | carteira/transação não encontrada — inclusive fora do provedor autenticado |
+| `409` | conflito de idempotência (mesma chave, payload diferente) ou abertura duplicada |
+| `422` | rejeição de negócio terminal (`INSUFFICIENT_FUNDS`, `DUPLICATE_REVERSAL`, moeda incompatível, …) |
+| `503` | indisponibilidade transitória (retry do cliente) |
+
+Corpo de erro: `{"code":"<failureCode>","message":"..."}`. Detalhes e o
+mapeamento completo estão em `ARCHITECTURE.md` §Contrato HTTP.
+
+## Consumidor SQS: tentativas e mensagens inválidas
+
+- **Visibility timeout**: `30s`. Falha transitória mantém a mensagem na fila; a
+  reentrega (após o prazo) é o retry com backoff — nada é apagado antes do
+  commit. Em `SIGTERM` o polling para e o processamento em andamento termina
+  dentro do prazo.
+- **Limite de tentativas**: o redrive da entrada aponta à DLQ com
+  `maxReceiveCount = 5`; tentativas esgotadas são movidas **pelo SQS**. Falhas
+  permanentes são encaminhadas à DLQ imediatamente.
+- **Mensagens inválidas**: corpo ilegível → `INVALID_MESSAGE`; payload fora das
+  regras de domínio → o `failureCode` (ex.: `INVALID_MONEY`); reentrega com
+  conteúdo diferente do hash original → `PAYLOAD_MISMATCH` — todas à DLQ, sem
+  efeito no banco.
+- **Rejeições de negócio são terminais**: confirmadas na inbox, mensagem
+  removida, **sem** DLQ.
+- **Backoff exponencial**: em falha transitória o consumidor estende a
+  visibilidade (`ChangeMessageVisibility`, `5s*2^(n-1)`, teto `600s`) usando o
+  `ApproximateReceiveCount` do broker; a outbox reagenda cada registro com
+  backoff durável e idempotente. A duplicação da inbox é ancorada no `messageId`
+  do **envelope**; `INSERT ... ON CONFLICT DO NOTHING` evita que a reentrega
+  aborte a transação (25P02).
+
 ## Testes de integração
 
 Os testes com build tag `integration` exigem o Postgres local (default
@@ -176,6 +242,33 @@ Usam o **Postgres real** e um `fakeSQS` que implementa a interface
   destino) e nenhuma republicação após a confirmação.
 - `TestOutboxPublisherSurvivesInstanceChange` — outra instância retoma registros
   herdados sem republicar os já confirmados (`published_by` por instância).
+- `TestSameOperation50ParallelSingleDebit` — **specs §13.1**: a MESMA aposta
+  enviada 50 vezes em paralelo, com pools de conexões e memória independentes
+  (instâncias distintas), produz **exatamente um débito**, saldo 100.00→75.00 e
+  49 replays idempotentes (nenhum erro transitório persistido).
+- `TestHTTPAndSQSShareIdempotency` — a MESMA operação cruza **HTTP e SQS**
+  (specs §13): a primeira movimenta uma única vez; a entrada SQS com a mesma
+  chave e conteúdo é deduplicada pela inbox + idempotência persistente, sem
+  débito duplicado e sem DLQ.
+- `TestTwoEqualBetsOverBalance` — **§13/§8**: duas apostas de 80.00 disputando
+  um saldo de 100.00 → exatamente uma `PROCESSED` e a outra `REJECTED`
+  (`INSUFFICIENT_FUNDS`), **1 lançamento** e saldo final 20.00.
+- `TestConsumerCrashAfterCommitRedeliversOnce` — consumidor morre entre o
+  commit e o delete: a reentrega é deduplicada pela inbox, sem segundo débito.
+- `TestRefundThenRollbackSameBetRejected` / `TestRollbackWinTwiceRejected` —
+  **§7**: uma referência nunca sofre duas reversões processadas com o mesmo
+  efeito financeiro (`DUPLICATE_REVERSAL`), nos dois sentidos (crédito e débito).
+- `TestRollbackOutOfOrderResolvedByWorker` / `TestPendingReferenceExpiresRejected`
+  — ROLLBACK enviado antes da referência entra em `PENDING_REFERENCE` e o worker
+  resolve ao chegar a referência; referência que nunca chega esgota o TTL e
+  termina `REJECTED`/`REFERENCE_NOT_FOUND`, sem efeito.
+- `TestReplayAfterRestart` — nova instância sobre o mesmo banco reproduz o replay
+  idempotente e retoma pendências de referência (morte/restart do processo).
+- `TestIdempotencyConflictDifferentPayload` — mesma chave com conteúdo diferente
+  é `IDEMPOTENCY_CONFLICT`, sem efeito; conteúdo idêntico segue replay.
+- `TestCurrencyMismatchNoFinancialEffect`, `TestRefundRequiresProcessedBet`,
+  `TestOpeningEmitsWalletEvents` — moeda divergente sem efeito financeiro,
+  reversões exigem referência processada e a abertura publica os eventos.
 
 Contrato de DLQ (validado nos testes de falha): apenas **falha permanente**,
 **payload inválido** ou tentativas esgotadas vão à DLQ; rejeições de negócio são

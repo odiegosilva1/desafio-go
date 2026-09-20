@@ -40,6 +40,9 @@ type fakeSQS struct {
 	receiveErr error
 	sendErr    error
 	deleteErr  error
+	// visibilityChanges grava as visibilidades estendidas em falhas transitórias
+	// (backoff do consumidor), para asserção nos testes.
+	visibilityChanges []int32
 }
 
 func newFakeSQS(inputURL, dlqURL, eventURL string) *fakeSQS {
@@ -96,6 +99,13 @@ func (f *fakeSQS) DeleteMessage(ctx context.Context, params *sqs.DeleteMessageIn
 	}
 	f.input = kept
 	return &sqs.DeleteMessageOutput{}, nil
+}
+
+func (f *fakeSQS) ChangeMessageVisibility(ctx context.Context, params *sqs.ChangeMessageVisibilityInput, optFns ...func(*sqs.Options)) (*sqs.ChangeMessageVisibilityOutput, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.visibilityChanges = append(f.visibilityChanges, params.VisibilityTimeout)
+	return &sqs.ChangeMessageVisibilityOutput{}, nil
 }
 
 func (f *fakeSQS) GetQueueUrl(ctx context.Context, params *sqs.GetQueueUrlInput, optFns ...func(*sqs.Options)) (*sqs.GetQueueUrlOutput, error) {

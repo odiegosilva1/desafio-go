@@ -97,10 +97,12 @@ type WageringStore interface {
 	GetByIdempotencyKey(ctx context.Context, tx TxScope, providerID, key string) (wagering.Transaction, error)
 	// GetByExternalTxID resolve operação externa por (provider, externalTxID).
 	GetByExternalTxID(ctx context.Context, tx TxScope, providerID, externalTxID string) (wagering.Transaction, error)
-	// ListReversalsByReference retorna as transações de reversão que referenciam
-	// o externalTxID dado, para impedir duas reversões bem-sucedidas do mesmo
-	// tipo sobre a mesma referência (verificado sob o lock da carteira).
-	ListReversalsByReference(ctx context.Context, tx TxScope, referenceExternalID string) ([]wagering.Transaction, error)
+	// ListReversalsByReference retorna as transações de reversão do provedor que
+	// referenciam o externalTxID dado, para impedir que uma referência receba
+	// duas reversões bem-sucedidas com o mesmo efeito financeiro (verificado sob
+	// o lock da carteira). Escopada por provedor: o mesmo externalTxID de
+	// provedores distintos não interfere.
+	ListReversalsByReference(ctx context.Context, tx TxScope, providerID, referenceExternalID string) ([]wagering.Transaction, error)
 	// ListPendingReference retorna operações em PENDING_REFERENCE com
 	// próximo intervalo vencido (retomada durável do worker).
 	ListPendingReference(ctx context.Context, tx TxScope, now time.Time) ([]wagering.Transaction, error)
@@ -117,6 +119,7 @@ type OutboxRecord struct {
 	CausationID   string
 	OccurredAt    time.Time
 	Version       int
+	Attempts      int
 	Payload       []byte
 }
 
@@ -131,6 +134,11 @@ type OutboxStore interface {
 	// MarkPublished confirma a publicação apenas de registros ainda PENDING;
 	// 0 linhas indica republicação concorrente já confirmada.
 	MarkPublished(ctx context.Context, tx TxScope, eventID, publishedBy string, now time.Time) error
+	// RecordFailure persiste a falha de publicação de um registro ainda PENDING,
+	// incrementando a contagem de tentativas e reagendando o próximo envio com
+	// backoff exponencial (próxima disputa de outro publisher). Conflitos são
+	// coordenados por SKIP LOCKED na disputa.
+	RecordFailure(ctx context.Context, tx TxScope, eventID string, attempts int, nextAttemptAt time.Time) error
 }
 
 // InboxStore garante a idempotência durável do consumidor por mensagem.
