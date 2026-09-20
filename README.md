@@ -75,9 +75,14 @@ Os passos abaixo levam do clone à aplicação rodando.
 make infra    # docker compose up -d postgres localstack keycloak
 ```
 
-Sobe apenas os serviços de infraestrutura. Se preferir a stack completa
-(aplicação também containerizada), use `make up` (equivalente a
-`docker compose up --build -d` + provisionamento).
+Sobe apenas os serviços de infraestrutura. Para a stack completa (aplicação
+também containerizada, com build da imagem), use o comando exigido pela
+entrega ou seu equivalente:
+
+```sh
+docker compose up --build   # aplicação + Postgres + LocalStack + Keycloak
+make up                      # equivalente: up -d + provisionamento (realm + filas)
+```
 
 ### 4.2. Migrations (aplicar e reverter)
 
@@ -175,6 +180,13 @@ Isolamento por provedor, reconciliação com o cliente interno e fluxo
 interativo com o usuário de teste:
 
 ```sh
+# provedor B (token próprio)
+TOKEN_B="$(curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=provider-b' \
+  -d 'client_secret=provider-b-secret' \
+  | jq -r .access_token)"
+
 # provider-b não vê a carteira de provider-a
 curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/wallets/$WALLET \
   -H "Authorization: Bearer $TOKEN_B"    # 404
