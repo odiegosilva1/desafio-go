@@ -5,23 +5,38 @@ financeiras: Money sem ponto flutuante, ledger append-only, idempotência
 persistente, transactional outbox/inbox, concorrência por carteira e
 autenticação OAuth 2.0/OIDC via Keycloak.
 
-> Documento em construção. Veja o enunciado completo em [`specs.md`](specs.md).
+> Documento em construção. Veja o enunciado completo em [`specs.md`](specs.md) e
+> as decisões em [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
+## Pré-requisitos
+
+A partir de um checkout limpo você precisa de:
+
+| Ferramenta | Versão mínima | Observação |
+| --- | --- | --- |
+| Go | `1.25.0` | exigida pelo `go.mod` |
+| Docker + Docker Compose | Compose v2 | sobe `postgres`, `localstack` e `keycloak` |
+| `make` | — | atalhos documentados em §Comandos |
+| `jq` | — | apenas nos exemplos de chamadas (§Fluxos autenticados) |
+
+Nenhum segredo é necessário: todos os valores locais estão em
+[`.env.example`](.env.example) e os serviços provisionam as próprias
+dependências (`make up` cria o realm Keycloak e as filas SQS).
 
 ## Estrutura
 
 ```
-cmd/server/             entrada da aplicação e composição Fx
-internal/domain/        domínio puro (sem Fx/HTTP/SQS/pgx)
-internal/persistence/   repos, migrations e controle de concorrência
-internal/http/          roteador, handlers, middlewares e contratos
-internal/auth/          validação OIDC e autorização por provedor
-internal/messaging/     consumidor SQS, inbox e worker de outbox
-internal/app/           módulos Fx e ciclo de vida
-internal/observability/ logs JSON, métricas e health checks
-internal/reconcile/     reconciliação saldo x ledger
-migrations/             SQL versionado (up/down)
-deploy/                 realm Keycloak e provisionamento de filas SQS
-test/                   integração, concorrência e múltiplas instâncias
+cmd/server/               entrada da aplicação e sinalização
+cmd/migrate/              CLI de migrations (up|down)
+internal/domain/          domínio puro (money, ledger, wagering, wallet, event, derr)
+internal/application/     casos de uso, referências, outbox e reconciliação
+internal/storage/         port (interfaces) + postgres (pgx, migrações)
+internal/httpapi/         handlers HTTP, middlewares de auth e contratos
+internal/auth/            validação OIDC e autorização por provedor
+internal/messaging/       consumidor SQS + inbox, publisher, envelopes e provisionamento
+internal/app/             módulos Fx, ciclo de vida e migrations embutidas
+internal/observability/   logs JSON, métricas e health checks
+deploy/                   realm Keycloak e provisionamento das filas SQS
 ```
 
 ## Fluxo de trabalho (Git Flow)
@@ -41,6 +56,220 @@ make check   # gofmt -l, go vet, go build, go test, go test -race
 ## Comandos
 
 ```sh
-make check
-make up      # docker compose up --build
+make check              # gate unit (fmt, vet, build, test, race)
+make up                 # sobe Postgres + LocalStack + Keycloak e provisiona SQS
+make run                # go run ./cmd/server (com .env dev)
+make provision          # cria as filas SQS no LocalStack (idempotente)
+make db-up              # apenas Postgres
+make migrate            # aplica migrations (up, default)
+make migrate ARGS=down  # reverte migrations (até a versão anterior)
+make test-integration   # integração (exige Postgres; usa -p 1)
+make integration-check  # db-up + integração + race + db-down
+make e2e                # up + run (malha completa HTTP+SQS+Keycloak)
+make down               # derruba a infra
 ```
+
+Comandos exigidos pela §15 do specs, ou equivalentes via `make`:
+
+```sh
+docker compose up --build        # sobe toda a stack e provisiona (ou: make up)
+go test ./...                    # unit (ou: make test)
+go test -race ./...              # unit com detector de corrida (ou: make test-race)
+go vet ./...                     # análise estática (ou: make vet)
+```
+
+> `make up` equivale a `docker compose up --build` + provisionamento do realm
+> Keycloak e das filas SQS; `make check` cobre `vet`, `build`, `test` e
+> `test-race`.
+
+## Fluxos autenticados (Keycloak) e exemplos de chamadas
+
+Com `make infra` o realm `wallet` é provisionado automaticamente com as
+**identidades de teste** abaixo (todas com valores locais, ver
+`deploy/keycloak/realm-export.json`):
+
+| Identidade            | Tipo        | Segredo/credencial        | Enxerga                    |
+|-----------------------|-------------|---------------------------|----------------------------|
+| `provider-a`          | cliente OAuth (provedor A) | `provider-a-secret` | só carteiras/transações de `provider-a` |
+| `provider-b`          | cliente OAuth (provedor B) | `provider-b-secret` | só carteiras/transações de `provider-b` |
+| `wallet-service-internal` | cliente interno  | `wallet-internal-secret` | abertura/reconciliação (não é provedor) |
+| `tester` / `tester`   | usuário (password grant)  | senha `tester`      | fluxo interativo via `wallet-service`    |
+
+Obter um token de provedor (`client_credentials`) e inspecionar o JWT:
+
+```sh
+TOKEN_A="$(curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' \
+  -d 'client_id=provider-a' \
+  -d 'client_secret=provider-a-secret' \
+  | jq -r .access_token)"
+echo "$TOKEN_A" | cut -d. -f2 | base64 -d 2>/dev/null | jq {client_id,scope,aud} || true
+```
+
+Abrir uma carteira (o `client_id` do token define o `providerId`):
+
+```sh
+curl -s http://localhost:8080/wallets \
+  -H "Authorization: Bearer $TOKEN_A" -H 'Content-Type: application/json' \
+  -d '{"playerId":"player-1","initialBalance":{"amount":"100.00","currency":"BRL"}}'
+# {"id":"<walletId>","playerId":"player-1","balance":{"amount":"100.00","currency":"BRL"},"version":0}
+```
+
+Enviar uma aposta e consultar o resultado:
+
+```sh
+WALLET="<walletId>"
+curl -s http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $TOKEN_A" -H 'Content-Type: application/json' \
+  -d "{\"externalTransactionId\":\"tx-1\",\"playerId\":\"player-1\",\"walletId\":\"$WALLET\",
+        \"roundId\":\"round-1\",\"gameId\":\"fortune-chimp\",\"kind\":\"BET\",
+        \"money\":{\"amount\":\"25.00\",\"currency\":\"BRL\"}}"
+# {"transactionId":"...","status":"PROCESSED","balance":{"amount":"75.00","currency":"BRL"},...}
+
+curl -s http://localhost:8080/wallets/$WALLET \
+  -H "Authorization: Bearer $TOKEN_A"
+curl -s http://localhost:8080/wallets/$WALLET/ledger \
+  -H "Authorization: Bearer $TOKEN_A"
+```
+
+Isolamento por provedor (o token de `provider-b` **não** enxerga a carteira de
+`provider-a` → `404`), reconciliação apenas com o cliente interno e fluxo
+interativo com o usuário de teste:
+
+```sh
+# provider-b não vê a carteira de provider-a
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/wallets/$WALLET \
+  -H "Authorization: Bearer $TOKEN_B"    # 404
+
+# reconciliação (somente wallet-service-internal)
+TOKEN_INT="$(curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=client_credentials' -d 'client_id=wallet-service-internal' \
+  -d 'client_secret=wallet-internal-secret' | jq -r .access_token)"
+curl -s -X POST http://localhost:8080/wallets/$WALLET/reconciliation \
+  -H "Authorization: Bearer $TOKEN_INT" -H 'Content-Type: application/json' -d '{}'
+
+# usuário de teste (password grant, somente demonstração interativa)
+curl -s -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+  -d 'grant_type=password' -d 'client_id=wallet-service' \
+  -d 'client_secret=wallet-service-secret' -d 'username=tester' -d 'password=tester'
+```
+
+## Configuração
+
+Variáveis de ambiente documentadas em [`.env.example`](.env.example)
+(`HTTP_ADDR`, `DATABASE_URL`, `OIDC_*`, `AWS_*`, `WORKER_*`, `SHUTDOWN_TIMEOUT`,
+`LOG_LEVEL`). Nenhum segredo é embutido no código.
+
+## Contrato HTTP (códigos de status)
+
+| Status | Situação |
+| --- | --- |
+| `200` | operação concluída / leituras / reconciliação consistente |
+| `201` | carteira criada |
+| `202` | operação aguardando referência (`PENDING_REFERENCE`) |
+| `400` | entrada inválida (`INVALID_PAYLOAD`, `INVALID_MONEY`, `MISSING_IDEMPOTENCY_KEY`, `OPENING_BLOCKED`, cursor/limit) |
+| `404` | carteira/transação não encontrada — inclusive fora do provedor autenticado |
+| `409` | conflito de idempotência (mesma chave, payload diferente) ou abertura duplicada |
+| `422` | rejeição de negócio terminal (`INSUFFICIENT_FUNDS`, `DUPLICATE_REVERSAL`, moeda incompatível, …) |
+| `503` | indisponibilidade transitória (retry do cliente) |
+
+Corpo de erro: `{"code":"<failureCode>","message":"..."}`. Detalhes e o
+mapeamento completo estão em `ARCHITECTURE.md` §Contrato HTTP.
+
+## Consumidor SQS: tentativas e mensagens inválidas
+
+- **Visibility timeout**: `30s`. Falha transitória mantém a mensagem na fila; a
+  reentrega (após o prazo) é o retry com backoff — nada é apagado antes do
+  commit. Em `SIGTERM` o polling para e o processamento em andamento termina
+  dentro do prazo.
+- **Limite de tentativas**: o redrive da entrada aponta à DLQ com
+  `maxReceiveCount = 5`; tentativas esgotadas são movidas **pelo SQS**. Falhas
+  permanentes são encaminhadas à DLQ imediatamente.
+- **Mensagens inválidas**: corpo ilegível → `INVALID_MESSAGE`; payload fora das
+  regras de domínio → o `failureCode` (ex.: `INVALID_MONEY`); reentrega com
+  conteúdo diferente do hash original → `PAYLOAD_MISMATCH` — todas à DLQ, sem
+  efeito no banco.
+- **Rejeições de negócio são terminais**: confirmadas na inbox, mensagem
+  removida, **sem** DLQ.
+- **Backoff exponencial**: em falha transitória o consumidor estende a
+  visibilidade (`ChangeMessageVisibility`, `5s*2^(n-1)`, teto `600s`) usando o
+  `ApproximateReceiveCount` do broker; a outbox reagenda cada registro com
+  backoff durável e idempotente. A duplicação da inbox é ancorada no `messageId`
+  do **envelope**; `INSERT ... ON CONFLICT DO NOTHING` evita que a reentrega
+  aborte a transação (25P02).
+
+## Testes de integração
+
+Os testes com build tag `integration` exigem o Postgres local (default
+`postgres://wallet:wallet@localhost:5432/wallet`). São serializados
+(`-p 1`) porque exercitam o mesmo banco:
+
+```sh
+make db-up
+go test -tags integration -count=1 -p 1 ./internal/app/... ./internal/application/ ./internal/storage/... ./test/...
+```
+
+### Cenário multi-instância (`test/multiinstance`)
+
+`TestMultiInstanceIndependenceAndRecovery` demonstra as garantias de escala
+horizontal do specs (linhas 200/415): três **processos independentes**
+(os/exec do próprio binário de teste, cada um com pool de conexões, outbox
+publisher, reference worker e memória próprios) disputando o mesmo banco
+apenas por `FOR UPDATE SKIP LOCKED`. Valida carteiras paralelas, serialização
+da mesma carteira sob concorrência forte, rejeição por saldo, publicação da
+outbox exatamente uma vez por eventId no agregado das instâncias, e retomada
+de trabalho abandonado (`PENDING_REFERENCE` + outbox) após a morte brutal de
+uma instância.
+
+### Simulações de falha (`test/faults`)
+
+Usam o **Postgres real** e um `fakeSQS` que implementa a interface
+`messaging.SQSClient` (sem LocalStack), dirigindo o `Consumer` e o
+`OutboxPublisher` de produção contra falhas:
+
+- `TestConsumerDBOutageKeepsMessageAndRecovers` — banco indisponível durante o
+  processamento: a mensagem **permanece** na fila (sem delete, sem DLQ) e, com o
+  banco recuperado, a reentrega da mesma mensagem processa exatamente-uma-vez
+  (inbox deduplica).
+- `TestConsumerBusinessRejectionIsTerminalAndNoDLQ` — rejeição definitiva de
+  negócio (saldo insuficiente) é **terminal**: consome a mensagem, registra na
+  inbox com o código e **não** encaminha à DLQ (specs §10).
+- `TestConsumerInvalidPayloadToDLQ` — corpo ilegível vai à DLQ com
+  `INVALID_MESSAGE` e é removido da fila, sem efeito no banco.
+- `TestOutboxPublisherRetryPublishesExactlyOnce` — destino de eventos fora do
+  ar: registros permanecem `PENDING` (rollback, nenhum `MarkPublished` com
+  falha) e, recuperado, cada eventId é entregue com id estável (dedup no
+  destino) e nenhuma republicação após a confirmação.
+- `TestOutboxPublisherSurvivesInstanceChange` — outra instância retoma registros
+  herdados sem republicar os já confirmados (`published_by` por instância).
+- `TestSameOperation50ParallelSingleDebit` — **specs §13.1**: a MESMA aposta
+  enviada 50 vezes em paralelo, com pools de conexões e memória independentes
+  (instâncias distintas), produz **exatamente um débito**, saldo 100.00→75.00 e
+  49 replays idempotentes (nenhum erro transitório persistido).
+- `TestHTTPAndSQSShareIdempotency` — a MESMA operação cruza **HTTP e SQS**
+  (specs §13): a primeira movimenta uma única vez; a entrada SQS com a mesma
+  chave e conteúdo é deduplicada pela inbox + idempotência persistente, sem
+  débito duplicado e sem DLQ.
+- `TestTwoEqualBetsOverBalance` — **§13/§8**: duas apostas de 80.00 disputando
+  um saldo de 100.00 → exatamente uma `PROCESSED` e a outra `REJECTED`
+  (`INSUFFICIENT_FUNDS`), **1 lançamento** e saldo final 20.00.
+- `TestConsumerCrashAfterCommitRedeliversOnce` — consumidor morre entre o
+  commit e o delete: a reentrega é deduplicada pela inbox, sem segundo débito.
+- `TestRefundThenRollbackSameBetRejected` / `TestRollbackWinTwiceRejected` —
+  **§7**: uma referência nunca sofre duas reversões processadas com o mesmo
+  efeito financeiro (`DUPLICATE_REVERSAL`), nos dois sentidos (crédito e débito).
+- `TestRollbackOutOfOrderResolvedByWorker` / `TestPendingReferenceExpiresRejected`
+  — ROLLBACK enviado antes da referência entra em `PENDING_REFERENCE` e o worker
+  resolve ao chegar a referência; referência que nunca chega esgota o TTL e
+  termina `REJECTED`/`REFERENCE_NOT_FOUND`, sem efeito.
+- `TestReplayAfterRestart` — nova instância sobre o mesmo banco reproduz o replay
+  idempotente e retoma pendências de referência (morte/restart do processo).
+- `TestIdempotencyConflictDifferentPayload` — mesma chave com conteúdo diferente
+  é `IDEMPOTENCY_CONFLICT`, sem efeito; conteúdo idêntico segue replay.
+- `TestCurrencyMismatchNoFinancialEffect`, `TestRefundRequiresProcessedBet`,
+  `TestOpeningEmitsWalletEvents` — moeda divergente sem efeito financeiro,
+  reversões exigem referência processada e a abertura publica os eventos.
+
+Contrato de DLQ (validado nos testes de falha): apenas **falha permanente**,
+**payload inválido** ou tentativas esgotadas vão à DLQ; rejeições de negócio são
+confirmadas no inbox e removidas da fila.

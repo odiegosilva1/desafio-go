@@ -49,14 +49,14 @@ type Envelope struct {
 // sucesso, incluindo LOSS (neste caso walletVersion é omitido ou 0).
 type WagerTransactionProcessedData struct {
 	TransactionID                  string    `json:"transactionId"`
-	ExternalTransactionID          string    `json:"externalTransactionId"`
-	ProviderID                     string    `json:"providerId"`
+	ExternalTransactionID          string    `json:"externalTransactionId,omitempty"`
+	ProviderID                     string    `json:"providerId,omitempty"`
 	WalletID                       string    `json:"walletId"`
 	PlayerID                       string    `json:"playerId"`
-	RoundID                        string    `json:"roundId"`
-	GameID                         string    `json:"gameId"`
+	RoundID                        string    `json:"roundId,omitempty"`
+	GameID                         string    `json:"gameId,omitempty"`
 	Kind                           string    `json:"kind"`
-	Money                          moneyJSON `json:"money"`
+	Money                          MoneyJSON `json:"money"`
 	ReferenceExternalTransactionID string    `json:"referenceExternalTransactionId,omitempty"`
 	WalletVersion                  int       `json:"walletVersion,omitempty"`
 }
@@ -65,14 +65,14 @@ type WagerTransactionProcessedData struct {
 // regra de negócio, com failureCode estável.
 type WagerTransactionRejectedData struct {
 	TransactionID         string    `json:"transactionId"`
-	ExternalTransactionID string    `json:"externalTransactionId"`
-	ProviderID            string    `json:"providerId"`
+	ExternalTransactionID string    `json:"externalTransactionId,omitempty"`
+	ProviderID            string    `json:"providerId,omitempty"`
 	WalletID              string    `json:"walletId"`
 	PlayerID              string    `json:"playerId"`
-	RoundID               string    `json:"roundId"`
-	GameID                string    `json:"gameId"`
+	RoundID               string    `json:"roundId,omitempty"`
+	GameID                string    `json:"gameId,omitempty"`
 	Kind                  string    `json:"kind"`
-	Money                 moneyJSON `json:"money"`
+	Money                 MoneyJSON `json:"money"`
 	FailureCode           string    `json:"failureCode"`
 	FailureMessage        string    `json:"failureMessage,omitempty"`
 }
@@ -93,15 +93,15 @@ type WalletBalanceChangedData struct {
 	WalletID      string    `json:"walletId"`
 	TransactionID string    `json:"transactionId"`
 	Direction     Direction `json:"direction"`
-	Money         moneyJSON `json:"money"`
-	BalanceBefore moneyJSON `json:"balanceBefore"`
-	BalanceAfter  moneyJSON `json:"balanceAfter"`
+	Money         MoneyJSON `json:"money"`
+	BalanceBefore MoneyJSON `json:"balanceBefore"`
+	BalanceAfter  MoneyJSON `json:"balanceAfter"`
 	WalletVersion int       `json:"walletVersion"`
 }
 
-// moneyJSON evita importar o pacote money e cria dependência circular com
+// MoneyJSON evita importar o pacote money e cria dependência circular com
 // wagering. Mapeado para {"amount":"25.00","currency":"BRL"}.
-type moneyJSON struct {
+type MoneyJSON struct {
 	Amount   string `json:"amount"`
 	Currency string `json:"currency"`
 }

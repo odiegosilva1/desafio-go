@@ -4,6 +4,8 @@
 *.exe
 *.test
 *.out
+/wallet-service
+/wallet-migrate
 
 # Ambiente e segredos
 .env
@@ -32,3 +34,4 @@ Thumbs.db
 # Cobertura de testes
 coverage/
 coverage.txt
+specs.md

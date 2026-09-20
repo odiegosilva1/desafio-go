@@ -31,7 +31,7 @@ func mustMoney(t *testing.T, s string) money.Money {
 
 func openWallet(t *testing.T) (Wallet, Movement) {
 	t.Helper()
-	w, mov, err := Open("w-1", "p-1", money.CurrencyBRL, mustMoney(t, "100.00"), time.Now())
+	w, mov, err := Open("w-1", "provider-a", "p-1", money.CurrencyBRL, mustMoney(t, "100.00"), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,12 +39,15 @@ func openWallet(t *testing.T) (Wallet, Movement) {
 }
 
 func TestOpenWithPositiveInitialBalance(t *testing.T) {
-	w, mov, err := Open("w-1", "p-1", money.CurrencyBRL, mustMoney(t, "100.00"), time.Now())
+	w, mov, err := Open("w-1", "provider-a", "p-1", money.CurrencyBRL, mustMoney(t, "100.00"), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if w.Version() != 1 {
 		t.Errorf("Version = %d, want 1", w.Version())
+	}
+	if w.ProviderID() != "provider-a" {
+		t.Errorf("ProviderID = %q, want provider-a", w.ProviderID())
 	}
 	if mov.Direction() != ledger.DirectionCredit {
 		t.Errorf("Movement.Direction = %q, want CREDIT", mov.Direction())
@@ -58,7 +61,7 @@ func TestOpenWithPositiveInitialBalance(t *testing.T) {
 }
 
 func TestOpenWithZeroInitialBalanceHasNoMovement(t *testing.T) {
-	w, mov, err := Open("w-1", "p-1", money.CurrencyBRL, mustMoney(t, "0.00"), time.Now())
+	w, mov, err := Open("w-1", "provider-a", "p-1", money.CurrencyBRL, mustMoney(t, "0.00"), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,20 +77,22 @@ func TestOpenRejects(t *testing.T) {
 	cases := []struct {
 		name     string
 		id       string
+		provider string
 		player   string
 		currency money.Currency
 		amount   string
 		wantErr  error
 	}{
-		{"sem id", "", "p-1", money.CurrencyBRL, "0.00", ErrIDRequired},
-		{"sem jogador", "w-1", "", money.CurrencyBRL, "0.00", ErrPlayerRequired},
-		{"sem moeda", "w-1", "p-1", "", "0.00", ErrCurrencyRequired},
-		{"moeda inválida", "w-1", "p-1", "BR", "0.00", ErrCurrencyRequired},
-		{"saldo negativo", "w-1", "p-1", money.CurrencyBRL, "-0.01", ErrNegativeAmount},
+		{"sem id", "", "provider-a", "p-1", money.CurrencyBRL, "0.00", ErrIDRequired},
+		{"sem provedor", "w-1", "", "p-1", money.CurrencyBRL, "0.00", ErrProviderRequired},
+		{"sem jogador", "w-1", "provider-a", "", money.CurrencyBRL, "0.00", ErrPlayerRequired},
+		{"sem moeda", "w-1", "provider-a", "p-1", "", "0.00", ErrCurrencyRequired},
+		{"moeda inválida", "w-1", "provider-a", "p-1", "BR", "0.00", ErrCurrencyRequired},
+		{"saldo negativo", "w-1", "provider-a", "p-1", money.CurrencyBRL, "-0.01", ErrNegativeAmount},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, _, err := Open(c.id, c.player, c.currency, mustMoney(t, c.amount), time.Now())
+			_, _, err := Open(c.id, c.provider, c.player, c.currency, mustMoney(t, c.amount), time.Now())
 			if !errors.Is(err, c.wantErr) {
 				t.Errorf("Open err = %v, want %v", err, c.wantErr)
 			}
@@ -158,13 +163,16 @@ func TestCredit(t *testing.T) {
 
 func TestRehydrate(t *testing.T) {
 	created := time.Now().Add(-time.Hour)
-	w, err := Rehydrate("w-1", "p-1", money.CurrencyBRL,
+	w, err := Rehydrate("w-1", "provider-a", "p-1", money.CurrencyBRL,
 		mustMoney(t, "75.00"), 3, created, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if w.Version() != 3 {
 		t.Errorf("Version = %d, want 3", w.Version())
+	}
+	if w.ProviderID() != "provider-a" {
+		t.Errorf("ProviderID = %q, want provider-a", w.ProviderID())
 	}
 	if w.Balance().Amount() != "75.00" {
 		t.Errorf("Balance = %q", w.Balance().Amount())
@@ -175,27 +183,31 @@ func TestRehydrate(t *testing.T) {
 }
 
 func TestRehydrateRejects(t *testing.T) {
-	if _, err := Rehydrate("w-1", "p-1", money.CurrencyBRL,
+	if _, err := Rehydrate("w-1", "provider-a", "p-1", money.CurrencyBRL,
 		mustMoney(t, "0.00"), 0, time.Now(), time.Now()); !errors.Is(err, ErrInvalidVersion) {
 		t.Errorf("err = %v, want ErrInvalidVersion", err)
 	}
-	if _, err := Rehydrate("w-1", "p-1", money.CurrencyBRL,
+	if _, err := Rehydrate("w-1", "provider-a", "p-1", money.CurrencyBRL,
 		mustMoney(t, "-5.00"), 1, time.Now(), time.Now()); !errors.Is(err, ErrNegativeAmount) {
 		t.Errorf("err = %v, want ErrNegativeAmount", err)
+	}
+	if _, err := Rehydrate("w-1", "", "p-1", money.CurrencyBRL,
+		mustMoney(t, "0.00"), 1, time.Now(), time.Now()); !errors.Is(err, ErrProviderRequired) {
+		t.Errorf("err = %v, want ErrProviderRequired", err)
 	}
 }
 
 func TestEquality(t *testing.T) {
 	a := mustMoney(t, "25.00")
-	w := Wallet{id: "w", playerID: "p", currency: money.CurrencyBRL,
+	w := Wallet{id: "w", providerID: "p", playerID: "p", currency: money.CurrencyBRL,
 		balance: a, version: 2, createdAt: time.Time{}, updatedAt: time.Time{}}
-	other := Wallet{id: "w", playerID: "p", currency: money.CurrencyBRL,
+	other := Wallet{id: "w", providerID: "p", playerID: "p", currency: money.CurrencyBRL,
 		balance: a, version: 2, createdAt: time.Time{}, updatedAt: time.Time{}}
 	if !w.Equals(other) {
 		t.Error("wallets iguais deveriam ser Equals")
 	}
 
-	diff := Wallet{id: "w", playerID: "p", currency: money.CurrencyBRL,
+	diff := Wallet{id: "w", providerID: "p", playerID: "p", currency: money.CurrencyBRL,
 		balance: mustMoney(t, "24.99"), version: 2, createdAt: time.Time{}, updatedAt: time.Time{}}
 	if w.Equals(diff) {
 		t.Error("wallets com saldo diferente deveriam divergir em Equals")
