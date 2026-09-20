@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  unit:
+    name: Gate unitário (fmt, vet, build, test, race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make check
+
+  integration:
+    name: Integração (PostgreSQL real)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: wallet
+          POSTGRES_PASSWORD: wallet
+          POSTGRES_DB: wallet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wallet -d wallet"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Integração (sem e com race)
+        run: |
+          make test-integration
+          make test-race-integration
+
+  realstack:
+    name: Malha real (LocalStack + Keycloak sem fakes)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: wallet
+          POSTGRES_PASSWORD: wallet
+          POSTGRES_DB: wallet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wallet -d wallet"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      localstack:
+        image: localstack/localstack:3.4.0
+        env:
+          SERVICES: sqs
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+        ports:
+          - 4566:4566
+        options: >-
+          --health-cmd "curl -sf http://localhost:4566/_localstack/health"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+      # Realm importado no primeiro boot (deploy/keycloak realm-export.json);
+      # a prontidão é validada pelo passo "Aguardar realm" (impede falso SKIP).
+      keycloak:
+        image: quay.io/keycloak/keycloak:24.0.4
+        command: ["start-dev", "--import-realm"]
+        env:
+          KC_BOOTSTRAP_ADMIN_USERNAME: admin
+          KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+          KC_HOSTNAME: localhost
+        ports:
+          - 8081:8080
+        options: >-
+          --mount type=bind,source=$GITHUB_WORKSPACE/deploy/keycloak,target=/opt/keycloak/data/import
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Aguardar realm do Keycloak (importação)
+        run: |
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -X POST http://localhost:8081/realms/wallet/protocol/openid-connect/token \
+              -d 'grant_type=client_credentials' \
+              -d 'client_id=provider-a' \
+              -d 'client_secret=provider-a-secret' || true)
+            [ "$code" = "200" ] && { echo "realm OK ($i)"; exit 0; }
+            sleep 5
+          done
+          echo "realm do Keycloak não ficou pronto" >&2
+          exit 1
+      - name: Malha real (sem fakes)
+        run: go test -count=1 -p 1 -tags integration ./test/realstack/

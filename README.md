@@ -86,7 +86,7 @@ controlar manualmente, há uma CLI:
 
 ```sh
 make migrate             # aplica as migrations (up, default)
-# 2026-09-20... migrations aplicadas com sucesso
+# migrations aplicadas com sucesso
 make migrate ARGS=down   # reverte até a versão anterior
 # migration 0001 revertida com sucesso
 ```
